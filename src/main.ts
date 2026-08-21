@@ -298,7 +298,7 @@ export default class TinymistPlugin extends Plugin {
     await adapter.write(rel, text);
   }
 
-  private async openPreview(view: TypstView): Promise<void> {
+  async openPreview(view: TypstView): Promise<void> {
     const path = view.absolutePath();
     if (!path) return;
     let url: string;

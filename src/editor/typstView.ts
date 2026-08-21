@@ -70,6 +70,9 @@ export class TypstView extends TextFileView {
     this.detachDiagListener = plugin.onDiagnostics((uri) =>
       this.applyDiagnostics(uri),
     );
+    this.addAction("eye", "Open preview", () => {
+      void this.plugin.openPreview(this);
+    });
   }
 
   getViewType(): string {
