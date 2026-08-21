@@ -40,6 +40,11 @@ import {
   setSemanticTokens,
 } from "./semanticTokens";
 import { typstLanguage } from "./typstLanguage";
+import {
+  YoloEditorShim,
+  getYoloPlugin,
+  yoloRenderExtension,
+} from "./yoloBridge";
 
 interface LspRangeLike {
   start: { line: number; character: number };
@@ -58,6 +63,8 @@ export class TypstView extends TextFileView {
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
   private cursorTimer: ReturnType<typeof setTimeout> | null = null;
   private semanticTimer: ReturnType<typeof setTimeout> | null = null;
+  private yoloTimer: ReturnType<typeof setTimeout> | null = null;
+  private yoloShim: YoloEditorShim | null = null;
   private semanticGeneration = 0;
   private detachDiagListener: (() => void) | null = null;
   private openedLspPath: string | null = null;
@@ -148,9 +155,16 @@ export class TypstView extends TextFileView {
   }
 
   private freshState(data: string): EditorState {
+    const extraExtensions = [];
+    if (this.plugin.settings.yoloTabCompletion) {
+      const yolo = getYoloPlugin(this.plugin.app);
+      const rendered = yolo ? yoloRenderExtension(yolo) : null;
+      if (rendered) extraExtensions.push(rendered);
+    }
     return EditorState.create({
       doc: data,
       extensions: [
+        ...extraExtensions,
         lineNumbers(),
         history(),
         drawSelection(),
@@ -219,6 +233,7 @@ export class TypstView extends TextFileView {
       this.plugin.lsp.didChange(path, this.editor.state.doc.toString());
     }
     this.scheduleSemanticTokens();
+    this.scheduleYoloCompletion();
 
     if (this.saveTimer) clearTimeout(this.saveTimer);
     this.saveTimer = setTimeout(() => {
@@ -372,7 +387,32 @@ export class TypstView extends TextFileView {
     });
   }
 
+  private scheduleYoloCompletion(): void {
+    if (!this.plugin.settings.yoloTabCompletion) return;
+    if (this.yoloTimer) clearTimeout(this.yoloTimer);
+    this.yoloTimer = setTimeout(() => {
+      this.yoloTimer = null;
+      const editor = this.editor;
+      const yolo = getYoloPlugin(this.plugin.app);
+      if (!editor || !yolo || !editor.hasFocus) return;
+      const selection = editor.state.selection.main;
+      if (!selection.empty) return;
+      if (!this.yoloShim || this.yoloShim.cm !== editor) {
+        this.yoloShim = new YoloEditorShim(editor);
+      }
+      try {
+        void yolo.getTabCompletionController().run(this.yoloShim, selection.head);
+      } catch (err) {
+        console.warn("[tinymist] YOLO completion failed:", err);
+      }
+    }, 600);
+  }
+
   private flushTimers(): void {
+    if (this.yoloTimer) {
+      clearTimeout(this.yoloTimer);
+      this.yoloTimer = null;
+    }
     if (this.cursorTimer) {
       clearTimeout(this.cursorTimer);
       this.cursorTimer = null;

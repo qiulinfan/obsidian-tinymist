@@ -8,12 +8,15 @@ export interface TinymistSettings {
   saveDebounceMs: number;
   /** Passed to `tinymist preview --invert-colors` when not "never". */
   invertPreviewColors: "never" | "auto";
+  /** Experimental: drive the YOLO plugin's AI tab completion in .typ files. */
+  yoloTabCompletion: boolean;
 }
 
 export const DEFAULT_SETTINGS: TinymistSettings = {
   binaryPath: "",
   saveDebounceMs: 500,
   invertPreviewColors: "never",
+  yoloTabCompletion: false,
 };
 
 export class TinymistSettingTab extends PluginSettingTab {
@@ -56,6 +59,22 @@ export class TinymistSettingTab extends PluginSettingTab {
               this.plugin.settings.saveDebounceMs = n;
               await this.plugin.saveSettings();
             }
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName("YOLO tab completion (experimental)")
+      .setDesc(
+        "Drive the YOLO plugin's AI tab completion inside Typst files. " +
+          "Requires the YOLO plugin with tab completion enabled; reopen " +
+          ".typ files after changing. May break when YOLO updates.",
+      )
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.yoloTabCompletion)
+          .onChange(async (value) => {
+            this.plugin.settings.yoloTabCompletion = value;
+            await this.plugin.saveSettings();
           }),
       );
 
