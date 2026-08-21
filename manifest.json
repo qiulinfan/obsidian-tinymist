@@ -1,0 +1,10 @@
+{
+  "id": "obsidian-tinymist",
+  "name": "Tinymist Typst",
+  "version": "0.1.0",
+  "minAppVersion": "1.5.0",
+  "description": "Typst editing and live preview backed by the Tinymist language server: diagnostics, completion, hover, and incremental preview for .typ files.",
+  "author": "Qiulin Fan",
+  "authorUrl": "https://github.com/qiulinfan",
+  "isDesktopOnly": true
+}

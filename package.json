@@ -1,0 +1,32 @@
+{
+  "name": "obsidian-tinymist",
+  "version": "0.1.0",
+  "description": "Tinymist-grade Typst editing and live preview for Obsidian, backed by the Tinymist language server",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs watch",
+    "build": "tsc --noEmit && node esbuild.config.mjs production",
+    "check": "tsc --noEmit"
+  },
+  "keywords": ["obsidian", "typst", "tinymist"],
+  "overrides": {
+    "@codemirror/state": "6.5.0",
+    "@codemirror/view": "6.38.6"
+  },
+  "license": "Apache-2.0",
+  "devDependencies": {
+    "@codemirror/autocomplete": "^6.18.0",
+    "@codemirror/commands": "^6.6.0",
+    "@codemirror/language": "^6.10.0",
+    "@codemirror/lint": "^6.8.0",
+    "@codemirror/search": "^6.5.0",
+    "@codemirror/state": "6.5.0",
+    "@codemirror/view": "6.38.6",
+    "@lezer/highlight": "^1.2.0",
+    "@types/node": "^22.0.0",
+    "builtin-modules": "^4.0.0",
+    "esbuild": "^0.25.0",
+    "obsidian": "latest",
+    "typescript": "^5.5.0"
+  }
+}

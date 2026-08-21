@@ -1,0 +1,91 @@
+/* Editor view */
+.tym-editor-content {
+  padding: 0;
+  height: 100%;
+}
+.tym-editor-content .cm-editor {
+  height: 100%;
+  font-family: var(--font-monospace);
+  font-size: var(--font-text-size, 16px);
+  background: var(--background-primary);
+  color: var(--text-normal);
+}
+.tym-editor-content .cm-editor .cm-content {
+  caret-color: var(--text-normal);
+}
+.tym-editor-content .cm-editor .cm-gutters {
+  background: var(--background-primary);
+  color: var(--text-faint);
+  border-right: 1px solid var(--background-modifier-border);
+}
+.tym-editor-content .cm-editor .cm-activeLine {
+  background: var(--background-primary-alt);
+}
+.tym-editor-content .cm-editor .cm-selectionBackground,
+.tym-editor-content .cm-editor.cm-focused .cm-selectionBackground {
+  background: var(--text-selection);
+}
+.tym-editor-content .cm-tooltip {
+  background: var(--background-secondary);
+  color: var(--text-normal);
+  border: 1px solid var(--background-modifier-border);
+}
+.tym-editor-content .cm-tooltip-autocomplete ul li[aria-selected] {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
+/* Baseline syntax colors, theme-variable driven */
+.tym-comment {
+  color: var(--text-faint);
+  font-style: italic;
+}
+.tym-keyword {
+  color: var(--color-purple, #7657c8);
+}
+.tym-heading {
+  color: var(--color-blue, #2574d8);
+  font-weight: 700;
+}
+.tym-ref {
+  color: var(--color-cyan, #17a89a);
+}
+.tym-label {
+  color: var(--color-cyan, #17a89a);
+}
+.tym-string {
+  color: var(--color-green, #2f9e44);
+}
+.tym-raw {
+  font-family: var(--font-monospace);
+  color: var(--color-orange, #f27a24);
+}
+.tym-strong {
+  font-weight: 700;
+}
+.tym-emphasis {
+  font-style: italic;
+}
+.tym-math {
+  color: var(--color-yellow, #b8860b);
+}
+
+/* Hover documentation */
+.tym-hover {
+  max-width: 480px;
+  max-height: 320px;
+  overflow: auto;
+  padding: 6px 10px;
+}
+
+/* Preview pane */
+.tym-preview-content {
+  padding: 0;
+  height: 100%;
+}
+.tym-preview-frame {
+  width: 100%;
+  height: 100%;
+  border: none;
+  background: var(--background-primary);
+}
