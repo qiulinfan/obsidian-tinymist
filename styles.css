@@ -70,6 +70,77 @@
   color: var(--color-yellow, #b8860b);
 }
 
+/* Semantic tokens from the language server (supersede baseline classes) */
+.tym-sem-keyword,
+.tym-sem-macro,
+.tym-sem-decorator,
+.tym-sem-pol {
+  color: var(--color-purple, #7657c8);
+}
+.tym-sem-function,
+.tym-sem-method {
+  color: var(--color-blue, #2574d8);
+}
+.tym-sem-type,
+.tym-sem-class,
+.tym-sem-interface,
+.tym-sem-struct,
+.tym-sem-enum {
+  color: var(--color-cyan, #17a89a);
+}
+.tym-sem-string {
+  color: var(--color-green, #2f9e44);
+}
+.tym-sem-number,
+.tym-sem-bool,
+.tym-sem-escape {
+  color: var(--color-orange, #f27a24);
+}
+.tym-sem-comment {
+  color: var(--text-faint);
+  font-style: italic;
+}
+.tym-sem-heading {
+  color: var(--color-blue, #2574d8);
+  font-weight: 700;
+}
+.tym-sem-link,
+.tym-sem-ref,
+.tym-sem-label {
+  color: var(--color-cyan, #17a89a);
+}
+.tym-sem-raw {
+  font-family: var(--font-monospace);
+  color: var(--color-orange, #f27a24);
+}
+.tym-sem-operator,
+.tym-sem-punct,
+.tym-sem-delim,
+.tym-sem-marker {
+  color: var(--text-muted);
+}
+.tym-sem-error {
+  color: var(--color-red, #e03131);
+}
+.tym-sem-term {
+  font-weight: 700;
+}
+.tym-mod-math {
+  color: var(--color-yellow, #b8860b);
+}
+.tym-mod-strong {
+  font-weight: 700;
+}
+.tym-mod-emph {
+  font-style: italic;
+}
+
+/* Rename modal */
+.tym-rename-input {
+  width: 100%;
+  font-size: var(--font-ui-medium);
+}
+
 /* Hover documentation */
 .tym-hover {
   max-width: 480px;

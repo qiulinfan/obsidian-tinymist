@@ -36,7 +36,7 @@ export class PreviewView extends ItemView {
   }
 
   async onClose(): Promise<void> {
-    this.plugin.preview.stop();
+    void this.plugin.preview.stop();
     this.iframe = null;
     await super.onClose();
   }

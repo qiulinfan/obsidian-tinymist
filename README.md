@@ -16,19 +16,19 @@ and common locations.
 
 ## Status
 
-Early v0.1 — the basic end-to-end slice works and is used daily on a real
-multi-file math-notes vault:
+v0.2 — used daily on a real multi-file math-notes vault:
 
-- `.typ` files open in a CodeMirror 6 editor with baseline syntax
-  highlighting.
-- Diagnostics, completion (with snippet expansion), and hover documentation
-  from the Tinymist language server.
-- Live preview pane (Tinymist's incremental renderer) that follows your
-  edits via a configurable save debounce.
+- `.typ` files open in a CodeMirror 6 editor with semantic-token
+  highlighting from the language server (baseline tokenizer as fallback).
+- Diagnostics, completion (with snippet expansion), and hover documentation.
+- Live preview inside the LSP session: unsaved edits render, and cursor
+  sync is bidirectional — moving in the editor scrolls the preview, and
+  clicking the preview jumps the editor to the source, across files.
+- Go to definition (F12 / Cmd+click), rename symbol, and typstyle
+  formatting, all vault-wide.
 
-Not yet here: cursor/click sync between editor and preview, semantic-token
-highlighting, go-to-definition/rename/formatting, binary auto-download, and
-mobile. See the roadmap for the plan and ordering.
+Not yet here: find-references UI, outline panel, signature help, binary
+auto-download, and mobile. See the roadmap for the plan and ordering.
 
 ## Development
 

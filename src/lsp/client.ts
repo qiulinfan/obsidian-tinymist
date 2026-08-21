@@ -48,6 +48,9 @@ export class LspClient {
   private pending = new Map<number, Pending>();
   private versions = new Map<string, number>();
   private diagnosticsByUri = new Map<string, LspDiagnostic[]>();
+  private notificationHandlers = new Map<string, (params: unknown) => void>();
+  /** Raw server capabilities from the initialize response. */
+  serverCapabilities: Record<string, unknown> | null = null;
 
   constructor(
     private binPath: string,
@@ -81,7 +84,7 @@ export class LspClient {
       console.debug("[tinymist:lsp]", String(chunk).trimEnd());
     });
 
-    await this.request(
+    const initResult = (await this.request(
       "initialize",
       {
         processId: process.pid,
@@ -100,18 +103,53 @@ export class LspClient {
               },
             },
             hover: { contentFormat: ["markdown", "plaintext"] },
+            definition: {},
+            rename: { prepareSupport: false },
+            formatting: {},
+            semanticTokens: {
+              requests: { full: true },
+              tokenTypes: [
+                "namespace", "type", "class", "enum", "interface", "struct",
+                "typeParameter", "parameter", "variable", "property",
+                "enumMember", "event", "function", "method", "macro",
+                "keyword", "modifier", "comment", "string", "number",
+                "regexp", "operator", "decorator", "bool", "punct", "escape",
+                "link", "raw", "label", "ref", "heading", "marker", "term",
+                "delim", "pol", "error", "text",
+              ],
+              tokenModifiers: [
+                "declaration", "definition", "readonly", "static",
+                "deprecated", "abstract", "async", "modification",
+                "documentation", "defaultLibrary", "math", "strong", "emph",
+              ],
+              formats: ["relative"],
+              multilineTokenSupport: false,
+              overlappingTokenSupport: false,
+            },
           },
-          workspace: { configuration: true },
+          workspace: {
+            configuration: true,
+            workspaceEdit: { documentChanges: true },
+          },
         },
         initializationOptions: {
           exportPdf: "never",
           formatterMode: "typstyle",
+          // Ask for `tinymist/preview/scrollSource` notifications instead of
+          // `window/showDocument` requests for preview-click jumps.
+          customizedShowDocument: true,
         },
       },
       20000,
-    );
+    )) as { capabilities?: Record<string, unknown> } | null;
+    this.serverCapabilities = initResult?.capabilities ?? null;
     this.notify("initialized", {});
     this.setStatus("running");
+  }
+
+  /** Register a handler for a server->client notification method. */
+  onNotification(method: string, cb: (params: unknown) => void): void {
+    this.notificationHandlers.set(method, cb);
   }
 
   stop(): void {
@@ -177,6 +215,53 @@ export class LspClient {
     );
   }
 
+  definition(path: string, pos: LspPosition): Promise<unknown> {
+    return this.request(
+      "textDocument/definition",
+      { textDocument: { uri: pathToUri(path) }, position: pos },
+      5000,
+    );
+  }
+
+  rename(path: string, pos: LspPosition, newName: string): Promise<unknown> {
+    return this.request(
+      "textDocument/rename",
+      { textDocument: { uri: pathToUri(path) }, position: pos, newName },
+      10000,
+    );
+  }
+
+  formatting(path: string): Promise<unknown> {
+    return this.request(
+      "textDocument/formatting",
+      {
+        textDocument: { uri: pathToUri(path) },
+        options: { tabSize: 2, insertSpaces: true },
+      },
+      10000,
+    );
+  }
+
+  semanticTokensFull(path: string): Promise<unknown> {
+    return this.request(
+      "textDocument/semanticTokens/full",
+      { textDocument: { uri: pathToUri(path) } },
+      10000,
+    );
+  }
+
+  executeCommand<T = unknown>(
+    command: string,
+    args: unknown[],
+    timeoutMs = 15000,
+  ): Promise<T> {
+    return this.request(
+      "workspace/executeCommand",
+      { command, arguments: args },
+      timeoutMs,
+    ) as Promise<T>;
+  }
+
   private setStatus(s: LspStatus): void {
     this.status = s;
     this.onStatusChange?.(s);
@@ -230,6 +315,8 @@ export class LspClient {
         const items =
           (msg.params as { items?: unknown[] } | undefined)?.items ?? [];
         result = items.map(() => null);
+      } else if (msg.method === "workspace/applyEdit") {
+        result = { applied: false };
       }
       this.send({ jsonrpc: "2.0", id: msg.id, result });
       return;
@@ -242,6 +329,15 @@ export class LspClient {
         };
         this.diagnosticsByUri.set(params.uri, params.diagnostics ?? []);
         this.onDiagnostics(params.uri);
+        return;
+      }
+      const handler = this.notificationHandlers.get(msg.method);
+      if (handler) {
+        try {
+          handler(msg.params);
+        } catch (err) {
+          console.error(`[tinymist] ${msg.method} handler failed:`, err);
+        }
       }
       return;
     }

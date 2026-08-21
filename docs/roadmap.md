@@ -33,17 +33,20 @@ compiler, the language service, or the preview pipeline; we write the glue.
 
 ## v0.2 — editor depth
 
-- [ ] Preview through the LSP session (`tinymist.doStartPreview`) instead of
+- [x] Preview through the LSP session (`tinymist.doStartPreview`) instead of
       a separate process: unsaved-buffer preview and bidirectional
-      cursor/click sync (jump to source, follow cursor), outline data.
-- [ ] Semantic-token highlighting from the LSP layered over the base grammar.
-- [ ] Go to definition, references, rename across vault files.
-- [ ] Formatting via the built-in typstyle formatter (format-on-command,
-      optional format-on-save).
-- [ ] Signature help, folding, document symbols panel.
-- [ ] Dark-theme handling for the preview (`--invert-colors` setting or
-      theme-aware default).
-- [ ] Dynamic preview ports (`127.0.0.1:0`) and multi-preview lifecycle.
+      cursor/click sync (jump to source via `customizedShowDocument`
+      notifications, follow cursor via `tinymist.scrollPreview`; clickable
+      pages require `--partial-rendering`).
+- [x] Semantic-token highlighting from the LSP layered over the base grammar.
+- [x] Go to definition (F12 / Cmd+click) and rename across vault files.
+- [x] Formatting via the built-in typstyle formatter (format-on-command).
+- [x] Dark-theme handling for the preview (`--invert-colors` setting).
+- [x] Dynamic preview ports (`127.0.0.1:0`).
+- [ ] Find references UI and optional format-on-save.
+- [ ] Signature help, folding, document symbols/outline panel (the server
+      already pushes outline notifications; needs a view).
+- [ ] Multi-preview lifecycle (one preview task at a time today).
 
 ## v0.3 — product polish
 

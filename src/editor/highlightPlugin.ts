@@ -6,6 +6,7 @@ import {
   ViewPlugin,
   ViewUpdate,
 } from "@codemirror/view";
+import { semanticActiveField, setSemanticActive } from "./semanticTokens";
 
 /**
  * Obsidian inlines its own copy of the CM6 language plumbing, so Lezer
@@ -110,6 +111,8 @@ const MAX_TOKENIZE_LENGTH = 500_000;
 
 function buildDecorations(view: EditorView): DecorationSet {
   const doc = view.state.doc;
+  // LSP semantic tokens supersede the baseline tokenizer once available.
+  if (view.state.field(semanticActiveField, false)) return Decoration.none;
   if (doc.length > MAX_TOKENIZE_LENGTH) return Decoration.none;
   const end = view.visibleRanges.length
     ? view.visibleRanges[view.visibleRanges.length - 1].to
@@ -135,7 +138,10 @@ export const typstHighlightPlugin = ViewPlugin.fromClass(
     }
 
     update(update: ViewUpdate): void {
-      if (update.docChanged || update.viewportChanged) {
+      const semanticFlipped = update.transactions.some((tr) =>
+        tr.effects.some((e) => e.is(setSemanticActive)),
+      );
+      if (update.docChanged || update.viewportChanged || semanticFlipped) {
         this.decorations = buildDecorations(update.view);
       }
     }
