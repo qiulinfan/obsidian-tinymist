@@ -14,6 +14,22 @@ Desktop only. Requires a `tinymist` binary (Homebrew: `brew install
 tinymist`); the path is configurable in settings and auto-detected from PATH
 and common locations.
 
+## Status
+
+Early v0.1 — the basic end-to-end slice works and is used daily on a real
+multi-file math-notes vault:
+
+- `.typ` files open in a CodeMirror 6 editor with baseline syntax
+  highlighting.
+- Diagnostics, completion (with snippet expansion), and hover documentation
+  from the Tinymist language server.
+- Live preview pane (Tinymist's incremental renderer) that follows your
+  edits via a configurable save debounce.
+
+Not yet here: cursor/click sync between editor and preview, semantic-token
+highlighting, go-to-definition/rename/formatting, binary auto-download, and
+mobile. See the roadmap for the plan and ordering.
+
 ## Development
 
 ```sh
