@@ -7,6 +7,10 @@
 - Keep the runtime dependency footprint minimal. CodeMirror 6 and Lezer
   packages are provided by Obsidian at runtime and must stay in the esbuild
   `external` list; never bundle a second copy.
+- Obsidian inlines its own copy of the CM6 language plumbing, so Lezer style
+  props and `syntaxHighlighting` never decorate custom views. All highlighting
+  (baseline tokenizer today, LSP semantic tokens later) must go through the
+  direct decoration pipeline in `src/editor/highlightPlugin.ts`.
 - The LSP client is hand-rolled and minimal on purpose. Unknown server
   requests get a `null` response and a debug log; extend explicitly when a
   feature needs it.

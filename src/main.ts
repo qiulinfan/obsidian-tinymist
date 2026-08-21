@@ -54,6 +54,7 @@ export default class TinymistPlugin extends Plugin {
     this.addSettingTab(new TinymistSettingTab(this.app, this));
 
     this.app.workspace.onLayoutReady(() => void this.startLsp(false));
+
   }
 
   onunload(): void {

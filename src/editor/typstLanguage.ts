@@ -1,5 +1,4 @@
-import { HighlightStyle, StreamLanguage } from "@codemirror/language";
-import { tags } from "@lezer/highlight";
+import { StreamLanguage } from "@codemirror/language";
 
 interface TypstState {
   blockComment: number;
@@ -64,32 +63,4 @@ export const typstLanguage = StreamLanguage.define<TypstState>({
     stream.next();
     return null;
   },
-  tokenTable: {
-    lineComment: tags.lineComment,
-    comment: tags.blockComment,
-    keyword: tags.keyword,
-    heading: tags.heading,
-    link: tags.link,
-    labelName: tags.labelName,
-    string: tags.string,
-    monospace: tags.monospace,
-    strong: tags.strong,
-    emphasis: tags.emphasis,
-    number: tags.number,
-  },
 });
-
-/** Class-based so themes style everything via CSS variables in styles.css. */
-export const typstHighlightStyle = HighlightStyle.define([
-  { tag: tags.lineComment, class: "tym-comment" },
-  { tag: tags.blockComment, class: "tym-comment" },
-  { tag: tags.keyword, class: "tym-keyword" },
-  { tag: tags.heading, class: "tym-heading" },
-  { tag: tags.link, class: "tym-ref" },
-  { tag: tags.labelName, class: "tym-label" },
-  { tag: tags.string, class: "tym-string" },
-  { tag: tags.monospace, class: "tym-raw" },
-  { tag: tags.strong, class: "tym-strong" },
-  { tag: tags.emphasis, class: "tym-emphasis" },
-  { tag: tags.number, class: "tym-math" },
-]);

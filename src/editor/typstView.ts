@@ -10,7 +10,7 @@ import {
   historyKeymap,
   indentWithTab,
 } from "@codemirror/commands";
-import { bracketMatching, syntaxHighlighting } from "@codemirror/language";
+import { bracketMatching } from "@codemirror/language";
 import { lintGutter, setDiagnostics } from "@codemirror/lint";
 import { highlightSelectionMatches, searchKeymap } from "@codemirror/search";
 import { EditorState } from "@codemirror/state";
@@ -24,19 +24,19 @@ import {
 import { TextFileView, WorkspaceLeaf } from "obsidian";
 import { pathToUri } from "../lsp/client";
 import type TinymistPlugin from "../main";
+import { typstHighlightPlugin } from "./highlightPlugin";
 import {
   lspCompletionSource,
   lspDiagnosticsToCm,
   lspHoverTooltip,
 } from "./lspExtensions";
-import { typstHighlightStyle, typstLanguage } from "./typstLanguage";
+import { typstLanguage } from "./typstLanguage";
 
 export const VIEW_TYPE_TYPST = "tinymist-typst";
 
 export class TypstView extends TextFileView {
   private editor: EditorView | null = null;
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
-  private changeTimer: ReturnType<typeof setTimeout> | null = null;
   private detachDiagListener: (() => void) | null = null;
   private openedLspPath: string | null = null;
 
@@ -135,7 +135,7 @@ export class TypstView extends TextFileView {
         closeBrackets(),
         EditorView.lineWrapping,
         typstLanguage,
-        syntaxHighlighting(typstHighlightStyle),
+        typstHighlightPlugin,
         lintGutter(),
         autocompletion({
           override: [
@@ -166,14 +166,11 @@ export class TypstView extends TextFileView {
   }
 
   private onEdited(): void {
-    if (this.changeTimer) clearTimeout(this.changeTimer);
-    this.changeTimer = setTimeout(() => {
-      this.changeTimer = null;
-      const path = this.absolutePath();
-      if (path && this.editor && this.plugin.lsp?.status === "running") {
-        this.plugin.lsp.didChange(path, this.editor.state.doc.toString());
-      }
-    }, 150);
+    // Sync the buffer immediately: completion/hover requests race a debounce.
+    const path = this.absolutePath();
+    if (path && this.editor && this.plugin.lsp?.status === "running") {
+      this.plugin.lsp.didChange(path, this.editor.state.doc.toString());
+    }
 
     if (this.saveTimer) clearTimeout(this.saveTimer);
     this.saveTimer = setTimeout(() => {
@@ -186,10 +183,6 @@ export class TypstView extends TextFileView {
   }
 
   private flushTimers(): void {
-    if (this.changeTimer) {
-      clearTimeout(this.changeTimer);
-      this.changeTimer = null;
-    }
     if (this.saveTimer) {
       clearTimeout(this.saveTimer);
       this.saveTimer = null;
