@@ -43,6 +43,8 @@ compiler, the language service, or the preview pipeline; we write the glue.
 - [x] Formatting via the built-in typstyle formatter (format-on-command).
 - [x] Dark-theme handling for the preview (`--invert-colors` setting).
 - [x] Dynamic preview ports (`127.0.0.1:0`).
+- [x] Experimental YOLO bridge: drive the YOLO plugin's AI tab completion
+      inside `.typ` editors (default-off setting; ghost text, Tab accept).
 - [ ] Find references UI and optional format-on-save.
 - [ ] Signature help, folding, document symbols/outline panel (the server
       already pushes outline notifications; needs a view).

@@ -26,6 +26,8 @@ v0.2 — used daily on a real multi-file math-notes vault:
   clicking the preview jumps the editor to the source, across files.
 - Go to definition (F12 / Cmd+click), rename symbol, and typstyle
   formatting, all vault-wide.
+- Experimental: a bridge that drives the YOLO plugin's AI tab completion
+  inside Typst files (off by default; see settings).
 
 Not yet here: find-references UI, outline panel, signature help, binary
 auto-download, and mobile. See the roadmap for the plan and ordering.
