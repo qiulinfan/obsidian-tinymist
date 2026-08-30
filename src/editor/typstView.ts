@@ -21,8 +21,9 @@ import {
   keymap,
   lineNumbers,
 } from "@codemirror/view";
+import { join } from "path";
 import { TextFileView, WorkspaceLeaf } from "obsidian";
-import { pathToUri } from "../lsp/client";
+import { pathToUri, uriToPath } from "../lsp/client";
 import type TinymistPlugin from "../main";
 import { typstHighlightPlugin } from "./highlightPlugin";
 import {
@@ -145,7 +146,7 @@ export class TypstView extends TextFileView {
   absolutePath(): string | null {
     const base = this.plugin.vaultBasePath();
     if (!base || !this.file) return null;
-    return base + "/" + this.file.path;
+    return join(base, this.file.path);
   }
 
   /** Re-announce the open buffer, e.g. after a language-server restart. */
@@ -318,8 +319,14 @@ export class TypstView extends TextFileView {
     const uri = loc.uri ?? loc.targetUri;
     const range = loc.range ?? loc.targetSelectionRange ?? loc.targetRange;
     if (!uri || !range) return;
+    let targetPath: string;
+    try {
+      targetPath = uriToPath(uri);
+    } catch {
+      return;
+    }
     await this.plugin.openAndPlaceCursor(
-      decodeURIComponent(uri.replace(/^file:\/\//, "")),
+      targetPath,
       range.start.line,
       range.start.character,
     );

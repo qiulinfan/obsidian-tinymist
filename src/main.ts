@@ -1,6 +1,7 @@
 import { spawnSync } from "child_process";
 import { existsSync } from "fs";
 import { homedir } from "os";
+import { isAbsolute, join, relative, sep } from "path";
 import {
   App,
   FileSystemAdapter,
@@ -124,23 +125,45 @@ export default class TinymistPlugin extends Plugin {
     if (this.settings.binaryPath.trim()) {
       candidates.push(this.settings.binaryPath.trim());
     }
-    candidates.push(
-      "/opt/homebrew/bin/tinymist",
-      "/usr/local/bin/tinymist",
-      homedir() + "/.cargo/bin/tinymist",
-    );
+    if (process.platform === "win32") {
+      candidates.push(
+        join(homedir(), ".cargo", "bin", "tinymist.exe"),
+        join(
+          process.env.LOCALAPPDATA ?? join(homedir(), "AppData", "Local"),
+          "Microsoft",
+          "WinGet",
+          "Links",
+          "tinymist.exe",
+        ),
+      );
+    } else {
+      candidates.push(
+        "/opt/homebrew/bin/tinymist",
+        "/usr/local/bin/tinymist",
+        join(homedir(), ".cargo", "bin", "tinymist"),
+      );
+    }
     for (const c of candidates) {
       if (existsSync(c)) {
         this.resolvedBinary = c;
         return c;
       }
     }
-    // GUI apps get a minimal PATH; ask a login shell where tinymist lives.
-    const probe = spawnSync("/bin/sh", ["-lc", "command -v tinymist"], {
-      encoding: "utf8",
-      timeout: 4000,
-    });
-    const found = probe.status === 0 ? probe.stdout.trim() : "";
+    // GUI apps get a minimal PATH; probe it through the platform helper.
+    const probe = spawnSync(
+      process.platform === "win32" ? "where.exe" : "/bin/sh",
+      process.platform === "win32"
+        ? ["tinymist"]
+        : ["-lc", "command -v tinymist"],
+      {
+        encoding: "utf8",
+        timeout: 4000,
+      },
+    );
+    const found =
+      probe.status === 0
+        ? probe.stdout.split(/\r?\n/).map((s) => s.trim()).find(Boolean) ?? ""
+        : "";
     this.resolvedBinary = found || null;
     return this.resolvedBinary;
   }
@@ -198,9 +221,8 @@ export default class TinymistPlugin extends Plugin {
     line: number,
     character: number,
   ): Promise<void> {
-    const base = this.vaultBasePath();
-    if (!base || !absPath.startsWith(base + "/")) return;
-    const rel = absPath.slice(base.length + 1);
+    const rel = this.vaultRelativePath(absPath);
+    if (!rel) return;
     const file = this.app.vault.getAbstractFileByPath(rel);
     if (!(file instanceof TFile)) return;
 
@@ -264,9 +286,8 @@ export default class TinymistPlugin extends Plugin {
     absPath: string,
     edits: LspTextEdit[],
   ): Promise<void> {
-    const base = this.vaultBasePath();
-    if (!base || !absPath.startsWith(base + "/")) return;
-    const rel = absPath.slice(base.length + 1);
+    const rel = this.vaultRelativePath(absPath);
+    if (!rel) return;
     const adapter = this.app.vault.adapter;
     let text: string;
     try {
@@ -296,6 +317,21 @@ export default class TinymistPlugin extends Plugin {
       text = text.slice(0, r.from) + r.insert + text.slice(r.to);
     }
     await adapter.write(rel, text);
+  }
+
+  private vaultRelativePath(absPath: string): string | null {
+    const base = this.vaultBasePath();
+    if (!base) return null;
+    const rel = relative(base, absPath);
+    if (
+      !rel ||
+      rel === ".." ||
+      rel.startsWith(`..${sep}`) ||
+      isAbsolute(rel)
+    ) {
+      return null;
+    }
+    return rel.split(sep).join("/");
   }
 
   async openPreview(view: TypstView): Promise<void> {

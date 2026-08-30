@@ -1,4 +1,5 @@
 import { spawn, ChildProcess } from "child_process";
+import { fileURLToPath, pathToFileURL } from "url";
 
 export interface LspPosition {
   line: number;
@@ -20,11 +21,11 @@ export interface LspDiagnostic {
 export type LspStatus = "starting" | "running" | "stopped" | "failed";
 
 export function pathToUri(p: string): string {
-  return "file://" + p.split("/").map(encodeURIComponent).join("/");
+  return pathToFileURL(p).href;
 }
 
 export function uriToPath(uri: string): string {
-  return decodeURIComponent(uri.replace(/^file:\/\//, ""));
+  return fileURLToPath(uri);
 }
 
 interface Pending {
@@ -84,67 +85,75 @@ export class LspClient {
       console.debug("[tinymist:lsp]", String(chunk).trimEnd());
     });
 
-    const initResult = (await this.request(
-      "initialize",
-      {
-        processId: process.pid,
-        rootUri: pathToUri(this.rootPath),
-        workspaceFolders: [
-          { uri: pathToUri(this.rootPath), name: "vault" },
-        ],
-        capabilities: {
-          textDocument: {
-            synchronization: { didSave: true },
-            publishDiagnostics: { relatedInformation: false },
-            completion: {
-              completionItem: {
-                snippetSupport: true,
-                documentationFormat: ["markdown", "plaintext"],
+    try {
+      const initResult = (await this.request(
+        "initialize",
+        {
+          processId: process.pid,
+          rootUri: pathToUri(this.rootPath),
+          workspaceFolders: [
+            { uri: pathToUri(this.rootPath), name: "vault" },
+          ],
+          capabilities: {
+            textDocument: {
+              synchronization: { didSave: true },
+              publishDiagnostics: { relatedInformation: false },
+              completion: {
+                completionItem: {
+                  snippetSupport: true,
+                  documentationFormat: ["markdown", "plaintext"],
+                },
+              },
+              hover: { contentFormat: ["markdown", "plaintext"] },
+              definition: {},
+              rename: { prepareSupport: false },
+              formatting: {},
+              semanticTokens: {
+                requests: { full: true },
+                tokenTypes: [
+                  "namespace", "type", "class", "enum", "interface", "struct",
+                  "typeParameter", "parameter", "variable", "property",
+                  "enumMember", "event", "function", "method", "macro",
+                  "keyword", "modifier", "comment", "string", "number",
+                  "regexp", "operator", "decorator", "bool", "punct", "escape",
+                  "link", "raw", "label", "ref", "heading", "marker", "term",
+                  "delim", "pol", "error", "text",
+                ],
+                tokenModifiers: [
+                  "declaration", "definition", "readonly", "static",
+                  "deprecated", "abstract", "async", "modification",
+                  "documentation", "defaultLibrary", "math", "strong", "emph",
+                ],
+                formats: ["relative"],
+                multilineTokenSupport: false,
+                overlappingTokenSupport: false,
               },
             },
-            hover: { contentFormat: ["markdown", "plaintext"] },
-            definition: {},
-            rename: { prepareSupport: false },
-            formatting: {},
-            semanticTokens: {
-              requests: { full: true },
-              tokenTypes: [
-                "namespace", "type", "class", "enum", "interface", "struct",
-                "typeParameter", "parameter", "variable", "property",
-                "enumMember", "event", "function", "method", "macro",
-                "keyword", "modifier", "comment", "string", "number",
-                "regexp", "operator", "decorator", "bool", "punct", "escape",
-                "link", "raw", "label", "ref", "heading", "marker", "term",
-                "delim", "pol", "error", "text",
-              ],
-              tokenModifiers: [
-                "declaration", "definition", "readonly", "static",
-                "deprecated", "abstract", "async", "modification",
-                "documentation", "defaultLibrary", "math", "strong", "emph",
-              ],
-              formats: ["relative"],
-              multilineTokenSupport: false,
-              overlappingTokenSupport: false,
+            workspace: {
+              configuration: true,
+              workspaceEdit: { documentChanges: true },
             },
           },
-          workspace: {
-            configuration: true,
-            workspaceEdit: { documentChanges: true },
+          initializationOptions: {
+            exportPdf: "never",
+            formatterMode: "typstyle",
+            // Ask for `tinymist/preview/scrollSource` notifications instead of
+            // `window/showDocument` requests for preview-click jumps.
+            customizedShowDocument: true,
           },
         },
-        initializationOptions: {
-          exportPdf: "never",
-          formatterMode: "typstyle",
-          // Ask for `tinymist/preview/scrollSource` notifications instead of
-          // `window/showDocument` requests for preview-click jumps.
-          customizedShowDocument: true,
-        },
-      },
-      20000,
-    )) as { capabilities?: Record<string, unknown> } | null;
-    this.serverCapabilities = initResult?.capabilities ?? null;
-    this.notify("initialized", {});
-    this.setStatus("running");
+        20000,
+      )) as { capabilities?: Record<string, unknown> } | null;
+      this.serverCapabilities = initResult?.capabilities ?? null;
+      this.notify("initialized", {});
+      this.setStatus("running");
+    } catch (err) {
+      this.setStatus("failed");
+      const proc = this.proc;
+      this.proc = null;
+      if (proc && !proc.killed) proc.kill();
+      throw err;
+    }
   }
 
   /** Register a handler for a server->client notification method. */
