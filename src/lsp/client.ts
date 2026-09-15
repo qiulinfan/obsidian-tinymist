@@ -52,6 +52,12 @@ export class LspClient {
   private notificationHandlers = new Map<string, (params: unknown) => void>();
   /** Raw server capabilities from the initialize response. */
   serverCapabilities: Record<string, unknown> | null = null;
+  private configuration = {
+    exportPdf: "never",
+    formatterMode: "typstyle",
+    customizedShowDocument: true,
+    typstExtraArgs: [] as string[],
+  };
 
   constructor(
     private binPath: string,
@@ -134,13 +140,7 @@ export class LspClient {
               workspaceEdit: { documentChanges: true },
             },
           },
-          initializationOptions: {
-            exportPdf: "never",
-            formatterMode: "typstyle",
-            // Ask for `tinymist/preview/scrollSource` notifications instead of
-            // `window/showDocument` requests for preview-click jumps.
-            customizedShowDocument: true,
-          },
+          initializationOptions: this.configuration,
         },
         20000,
       )) as { capabilities?: Record<string, unknown> } | null;
@@ -159,6 +159,16 @@ export class LspClient {
   /** Register a handler for a server->client notification method. */
   onNotification(method: string, cb: (params: unknown) => void): void {
     this.notificationHandlers.set(method, cb);
+  }
+
+  /** LSP previews use compiler configuration, not the CLI preview inputs. */
+  setPreviewSource(source?: string): void {
+    const args = source
+      ? ["--root", this.rootPath, "--input", `preview-source=${source}`]
+      : [];
+    if (JSON.stringify(args) === JSON.stringify(this.configuration.typstExtraArgs)) return;
+    this.configuration.typstExtraArgs = args;
+    this.notify("workspace/didChangeConfiguration", { settings: this.configuration });
   }
 
   stop(): void {
@@ -316,14 +326,18 @@ export class LspClient {
     error?: { message?: string };
   }): void {
     if (msg.method !== undefined && msg.id !== undefined) {
-      // Server -> client request. workspace/configuration gets one null per
-      // item (tinymist falls back to initializationOptions/defaults); every
-      // other request is acknowledged with null.
+      // Preserve explicit compiler settings if the server pulls configuration.
       let result: unknown = null;
       if (msg.method === "workspace/configuration") {
         const items =
-          (msg.params as { items?: unknown[] } | undefined)?.items ?? [];
-        result = items.map(() => null);
+          (msg.params as { items?: { section?: string }[] } | undefined)?.items ?? [];
+        result = items.map(({ section }) => {
+          if (section === "tinymist") return this.configuration;
+          const key = section?.replace(/^tinymist\./, "");
+          return key && Object.hasOwn(this.configuration, key)
+            ? this.configuration[key as keyof typeof this.configuration]
+            : null;
+        });
       } else if (msg.method === "workspace/applyEdit") {
         result = { applied: false };
       }

@@ -32,11 +32,39 @@ v0.2 — used daily on a real multi-file math-notes vault:
 Not yet here: find-references UI, outline panel, signature help, binary
 auto-download, and mobile. See the roadmap for the plan and ordering.
 
+## Styled chapter previews
+
+For chapters that import template functions but do not apply the document's
+layout, put a `.tinymist-preview.typ` file in their directory or an ancestor
+inside the vault. The nearest file becomes the preview entry. It receives
+`sys.inputs.at("preview-source")`, the selected source's absolute Typst path
+relative to the vault root (not an OS path). For example:
+
+```typst
+#import "template.typ": chapter-layout
+#show: chapter-layout
+#include sys.inputs.at("preview-source")
+```
+
+The project template owns all styling and can decide which files to wrap.
+Place it in a chapters directory to limit its scope, or let it pass complete
+documents through without another layout. Without this file, previews compile
+the selected file directly. Opening the preview template itself also compiles
+it directly; it must provide a default input if it supports that use.
+
+The plugin sets `--root <vault>` and `--input preview-source=...` through
+Tinymist's LSP compiler configuration for the preview session;
+it does not rewrite chapter buffers. Tinymist includes the original source,
+preserving live edits and source positions. Ordinary compilation/export is
+unaffected. Reopen the preview after adding or removing a template.
+
 ## Development
 
 ```sh
 npm install
 npm run build        # or: npm run dev (watch mode)
+npm test
+TINYMIST_BIN=/absolute/path/to/tinymist npm test  # real LSP integration test
 scripts/install-dev.sh /absolute/path/to/vault
 ```
 

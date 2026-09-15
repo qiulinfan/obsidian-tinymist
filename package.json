@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "node esbuild.config.mjs watch",
     "build": "tsc --noEmit && node esbuild.config.mjs production",
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "test": "node scripts/test-preview.mjs"
   },
   "keywords": ["obsidian", "typst", "tinymist"],
   "overrides": {

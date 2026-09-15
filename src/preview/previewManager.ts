@@ -1,4 +1,6 @@
 import type TinymistPlugin from "../main";
+import { basename } from "path";
+import { previewEntry } from "./previewEntry";
 
 interface PreviewResult {
   dataPlanePort?: string | number;
@@ -75,15 +77,29 @@ export class PreviewManager {
     if (this.plugin.settings.invertPreviewColors !== "never") {
       args.push(`--invert-colors=${this.plugin.settings.invertPreviewColors}`);
     }
-    args.push(filePath);
+    const root = this.plugin.vaultBasePath();
+    if (!root) throw new Error("preview requires a local vault");
+    const entry = previewEntry(filePath, root);
+    lsp.setPreviewSource(entry.sourceInput);
+    args.push("--page-title", basename(filePath), entry.filePath);
 
-    const result = await lsp.executeCommand<PreviewResult>(
-      "tinymist.doStartPreview",
-      [args],
-      20000,
-    );
+    let result: PreviewResult;
+    try {
+      result = await lsp.executeCommand<PreviewResult>(
+        "tinymist.doStartPreview",
+        [args],
+        20000,
+      );
+    } catch (error) {
+      lsp.setPreviewSource();
+      throw error;
+    }
     const port = result?.staticServerPort;
-    if (!port) throw new Error("preview did not report a server port");
+    if (!port) {
+      await lsp.executeCommand("tinymist.doKillPreview", [taskId], 5000).catch(() => {});
+      lsp.setPreviewSource();
+      throw new Error("preview did not report a server port");
+    }
 
     this.taskId = taskId;
     this.filePath = filePath;
@@ -114,6 +130,7 @@ export class PreviewManager {
       await lsp
         .executeCommand("tinymist.doKillPreview", [taskId], 5000)
         .catch(() => {});
+      lsp.setPreviewSource();
     }
   }
 }
