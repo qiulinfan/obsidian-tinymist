@@ -30,7 +30,7 @@ belong to `src/editor/shared/keyArbiter.ts`. The bridge relies on YOLO
 
 | Situation | Key | Result |
 |---|---|---|
-| Completion popup open | Tab / Enter | The popup wins: Tab accepts; Enter accepts only if that changes the text, else it is a newline. No ghost text is shown while the popup is open. |
+| Completion popup open | Tab / Enter | The popup wins: Tab accepts; Enter accepts only if that changes the text, else it is a newline. A list a trigger character opened (`#calc.`, `$arrow.`) is not taken by Enter until you type or move the selection. No ghost text is shown while the popup is open. |
 | Ghost text visible | Tab | Inserts exactly the text shown (no Markdown escaping of `<label>` or `$x> 0$`), one undo step. |
 | Ghost text visible | Enter | Newline; AI text is never accepted with Enter. |
 | Ghost text visible | Shift-Tab / Escape | Dismiss. |

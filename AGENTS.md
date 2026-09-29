@@ -19,9 +19,15 @@
   showing the same file share one server-side copy per `LspClient` (didOpen
   for the first pane, didClose for the last), so an edit reaches the server
   once. Saves never write while a composition is open (`TypstView.save`).
+  `TypstView` keeps a CRLF file CRLF (CodeMirror and the server hold LF;
+  `getViewData` converts back), so opening a file and switching away never
+  rewrites it.
 - Editor keys: Tab, Shift-Tab, Enter, Escape, ArrowUp and ArrowDown are owned
   by `keyArbiter` (`src/editor/shared/keyArbiter.ts`), which must stay the
-  FIRST extension of the editor state. Never bind these keys anywhere else
+  FIRST extension of the editor state. Enter accepts a completion only when
+  that changes the text, never from a list a trigger character opened
+  (`#calc.` + Enter is a newline) until something is typed or the selection
+  moved, and never accepts AI text. Never bind these keys anywhere else
   (no `completionKeymap`, no YOLO keymap); add Enter behaviour as an arbiter
   `enter` hook. The Tab the arbiter declines is `typstTab` at the end of the
   view keymap (nest a list item, else `indentOrInsertTab`), also passed as

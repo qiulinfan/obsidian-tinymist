@@ -274,6 +274,55 @@ test("after `.` the list keeps tinymist's order: modifiers first, no usage boost
   }
 });
 
+// tinymist 0.15.2's recorded answers (a synthetic project, see the fixture's "note").
+const RECORDED = JSON.parse(readFileSync("tests/fixtures/tinymist-completion.json", "utf8")) as {
+  cases: Record<string, { doc: string; offset: number; position: LspPosition; response: unknown }>;
+};
+
+test("a list `.` opened (recorded tinymist): Enter is a newline until the user types or navigates", async () => {
+  // TS-1: Enter used to take tinymist's first member (`#calc.abs()`) or modifier and
+  // rewrite the text. Tab after `.` still accepts the selected entry.
+  const cases: [string, string[], string][] = [
+    // [recorded case, keys after `.` (letters are typed), its line on]
+    ["calc_dot", ["Enter"], "#calc.\n|\n"],
+    ["calc_dot", ["ArrowDown", "Enter"], "#calc.pow(|)\n"],
+    ["calc_dot", ["ab", "Enter"], "#calc.abs(|)\n"],
+    ["calc_dot", ["Tab"], "#calc.abs(|)\n"],
+    ["postfix", ["Enter"], "$arrow.\n|$\n"],
+    ["postfix", ["ArrowDown", "Enter"], "$arrow.bar|$\n"],
+    ["postfix", ["ba", "Enter"], "$arrow.bar|$\n"],
+    ["postfix", ["Tab"], "$arrow.b|$\n"],
+  ];
+  for (const [name, keys, want] of cases) {
+    const rec = RECORDED.cases[name];
+    const dot = rec.offset - 1;
+    assert.equal(rec.doc[dot], ".", name);
+    const answer = (pos: LspPosition, doc: string) =>
+      doc === rec.doc && pos.line === rec.position.line && pos.character === rec.position.character
+        ? structuredClone(rec.response)
+        : null;
+    const { backend: b, calls } = backend(answer);
+    const view = editor(rec.doc.slice(0, dot) + "|" + rec.doc.slice(rec.offset), b);
+    const lineStart = view.state.doc.lineAt(dot).from;
+    const label = `${name} . ${keys.join(" ")}`;
+    try {
+      await typeSlowly(view, ".");
+      await waitFor(() => selectedCompletionIndex(view.state) !== null);
+      await sleep(90); // interactionDelay
+      assert.equal(calls.length, 1, label);
+      for (const key of keys) {
+        if (/^[a-z]+$/.test(key)) await typeSlowly(view, key);
+        else press(view, key);
+      }
+      await sleep(0);
+      assert.equal(withCursor(view).slice(lineStart), want, label);
+      assert.equal(calls.length, 1, `${label}: typing on filters the same list`);
+    } finally {
+      view.destroy();
+    }
+  }
+});
+
 test("string values (fonts): one request, filtered while typing, accepting replaces the typed text", async () => {
   // tinymist 0.15.2: quoted labels, but edits at the cursor. Right after the `"` trigger the
   // edit is the bare value; once something is typed it is the value with its opening quote.
@@ -445,7 +494,7 @@ test("* and _ typed over a selection wrap it; not in math", () => {
   }
 });
 
-test("Typst language data: // comments, $ opens display math, quotes pair", () => {
+test("Typst language data: // comments, $ opens display math (also after Chinese text), quotes and brackets pair", () => {
   const view = editor("x = 1|");
   try {
     toggleComment(view);
@@ -456,6 +505,30 @@ test("Typst language data: // comments, $ opens display math, quotes pair", () =
     view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: "" } });
     typeInput(view, '"');
     assert.equal(withCursor(view), '"|"');
+    // `$` right after Chinese text pairs too (UX-07: `$x$，` is common in the notes).
+    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: "设，则" }, selection: { anchor: 1 } });
+    typeInput(view, "$");
+    assert.equal(withCursor(view), "设$|$，则");
+    typeInput(view, "x$");
+    assert.equal(withCursor(view), "设$x$|，则", "the closer steps over");
+    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: "设，则" }, selection: { anchor: 1 } });
+    typeInput(view, "$$");
+    assert.equal(withCursor(view), "设$ | $，则");
+    // A `$` that closes math open on the line stays single, also after Chinese text.
+    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: "$a in 集" }, selection: { anchor: 7 } });
+    typeInput(view, "$");
+    assert.equal(withCursor(view), "$a in 集$|");
+    // Brackets pair before Chinese punctuation too (the shared CLOSE_BEFORE, as in LaTeX Live).
+    for (const [open, close] of [["(", ")"], ["[", "]"], ["{", "}"]]) {
+      for (const punct of ["，", "。", "）", "」"]) {
+        view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: `#f${punct}` }, selection: { anchor: 2 } });
+        typeInput(view, open);
+        assert.equal(withCursor(view), `#f${open}|${close}${punct}`);
+      }
+    }
+    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: "#fx" }, selection: { anchor: 2 } });
+    typeInput(view, "(");
+    assert.equal(withCursor(view), "#f(|x", "not before a letter");
   } finally {
     view.destroy();
   }

@@ -35,6 +35,7 @@ import type { LspClient, LspContentChange } from "../lsp/client";
 import { typstHighlightPlugin } from "./highlightPlugin";
 import { semanticTokensExtension } from "./semanticTokens";
 import {
+  CLOSE_BEFORE,
   darkThemeExtension,
   editNotifier,
   indentOrInsertTab,
@@ -93,8 +94,11 @@ export function typstEditorExtensions(
     host.yolo ?? [],
     EditorState.allowMultipleSelections.of(true),
     darkThemeExtension(),
+    // Brackets pair before Chinese punctuation too (`设(|)，`); mathInput pairs `$` after
+    // Chinese text (`设$|$，则`) with the same CLOSE_BEFORE set (UX-07).
     languageData({
       brackets: ["(", "[", "{", '"', "$"],
+      before: CLOSE_BEFORE,
       lineComment: "//",
       blockComment: { open: "/*", close: "*/" },
     }),

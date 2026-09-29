@@ -192,6 +192,59 @@ test("the Typst editor stack against a real tinymist", { skip: !BIN && "tinymist
       }
     });
 
+    await t.test("a list `.` opened is not accepted by Enter until the user types or navigates", async () => {
+      // TS-1: Enter used to take tinymist's first member or postfix item and rewrite the text.
+      for (const [doc, after] of [
+        ["as proved in #cite(<basics>)|\n", "as proved in #cite(<basics>).\n|"],
+        ["$\n  forall x in A|\n$\n", "  forall x in A.\n  |"],
+        ["We have #calc|\n", "We have #calc.\n|"],
+        ["$ a arrow|$\n", "$ a arrow.\n|"], // not rewritten by a modifier or postfix item
+      ]) {
+        const h = await open(BASE + doc);
+        try {
+          await type(h.view, ".", 250);
+          await usable(h.view);
+          press(h.view, "Enter");
+          const d = h.view.state.doc.toString();
+          const head = h.view.state.selection.main.head;
+          const around = d.slice(d.lastIndexOf("\n", d.lastIndexOf("\n", head - 1) - 1) + 1, head) + "|";
+          assert.equal(around, after, doc);
+          assert.equal(completionStatus(h.view.state), null);
+        } finally {
+          h.close();
+        }
+      }
+      // Typed on, or navigated: Enter accepts.
+      const h = await open(BASE + "#calc|\n");
+      try {
+        await type(h.view, ".ab", 250);
+        await usable(h.view);
+        press(h.view, "Enter");
+        assert.equal(line(h.view), "#calc.abs(|)");
+        const l4 = h.view.state.doc.line(4);
+        h.view.dispatch({ changes: { from: l4.from, to: l4.to, insert: "#calc" }, selection: { anchor: l4.from + 5 } });
+        await type(h.view, ".", 250);
+        await usable(h.view);
+        const second = labels(h.view)[1];
+        press(h.view, "ArrowDown");
+        press(h.view, "Enter");
+        assert.ok(line(h.view).startsWith(`#calc.${second}`), `${second}: ${line(h.view)}`);
+      } finally {
+        h.close();
+      }
+      // In math too. (A fresh file: with the erroring `#calc.pow()` above in the document,
+      // tinymist 0.15.2 answers nothing after `$ a arrow.`)
+      const m = await open(BASE + "$ a arrow|$\n");
+      try {
+        await type(m.view, ".ba", 250);
+        await usable(m.view);
+        press(m.view, "Enter");
+        assert.equal(line(m.view), "$ a arrow.bar|$");
+      } finally {
+        m.close();
+      }
+    });
+
     await t.test('string values: "us-le filters one list, Enter inserts the whole value', async () => {
       const h = await open(BASE + "#set page(paper: |)\n");
       try {

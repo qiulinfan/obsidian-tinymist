@@ -60,6 +60,8 @@ export class TypstView extends TextFileView {
   private lspFile: LspDocument;
   /** A save was skipped because an IME composition was open; compositionend reschedules it. */
   private saveAfterComposition = false;
+  /** The file uses CRLF line breaks (CodeMirror keeps LF); saves write them back. */
+  private crlf = false;
   /** Ephemeral state that arrived before the editor existed. */
   private pendingEState: EditorEphemeralState | null = null;
 
@@ -108,10 +110,15 @@ export class TypstView extends TextFileView {
   }
 
   getViewData(): string {
-    return this.editor ? this.editor.state.doc.toString() : this.data;
+    if (!this.editor) return this.data;
+    const text = this.editor.state.doc.toString();
+    return this.crlf ? text.replace(/\n/g, "\r\n") : text;
   }
 
   setViewData(data: string, clear: boolean): void {
+    // CodeMirror joins lines with LF; keep a CRLF file CRLF (its first line break decides),
+    // so opening and switching away never rewrites it.
+    this.crlf = /^[^\n]*\r\n/.test(data);
     if (!this.editor) {
       this.contentEl.addClasses(["tym-editor-content", "lsp-cm-view"]);
       this.editor = new EditorView({

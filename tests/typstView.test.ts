@@ -85,3 +85,35 @@ test("uncommitted IME text (Pinyin) is never written; the committed text is save
     TextFileView.requestSaveMs = requestSaveMs;
   }
 });
+
+test("a CRLF file stays CRLF: opening it and switching away never rewrites it; saves keep CRLF", async () => {
+  const { view, vault } = typstView(50);
+  const crlf = "= Title\r\n\r\n$ x $\r\n";
+  vault.files.set("a.typ", crlf);
+  vault.files.set("b.typ", "b\n");
+  try {
+    await view.loadFile(new TFile("a.typ") as never);
+    assert.equal(view.cm!.state.doc.toString(), "= Title\n\n$ x $\n"); // CodeMirror holds LF
+    assert.equal(view.getViewData(), crlf);
+    await view.loadFile(new TFile("b.typ") as never); // switch away
+    await view.loadFile(new TFile("a.typ") as never); // and back (the cached undo history)
+    await sleep(100);
+    assert.deepEqual(vault.writes, []);
+    // An edit is saved with the file's CRLF line breaks; an LF file stays LF.
+    let cm = view.cm!;
+    insert(cm, cm.state.doc.length, cm.state.doc.length, "more\n", false);
+    await sleep(150);
+    assert.deepEqual(vault.writes.map((w) => w.data), [`${crlf}more\r\n`]);
+    await view.loadFile(new TFile("b.typ") as never);
+    cm = view.cm!;
+    insert(cm, 1, 1, "\nc", false);
+    await sleep(150);
+    assert.deepEqual(vault.writes.map((w) => w.data).slice(1), ["b\nc\n"]);
+    // A change from outside follows the new text's line breaks.
+    view.setViewData("b\r\nc\r\nd\r\n", false);
+    assert.equal(view.cm!.state.doc.toString(), "b\nc\nd\n");
+    assert.equal(view.getViewData(), "b\r\nc\r\nd\r\n");
+  } finally {
+    await view.onClose();
+  }
+});
