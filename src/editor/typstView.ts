@@ -58,6 +58,8 @@ export class TypstView extends TextFileView {
   private detachDiagListener: (() => void) | null = null;
   /** The server's copy of the open file. */
   private lspFile: LspDocument;
+  /** A save was skipped because an IME composition was open; compositionend reschedules it. */
+  private saveAfterComposition = false;
   /** Ephemeral state that arrived before the editor existed. */
   private pendingEState: EditorEphemeralState | null = null;
 
@@ -195,32 +197,55 @@ export class TypstView extends TextFileView {
     if (this.editor) this.syncLspDoc(this.editor.state.doc);
   }
 
+  /**
+   * Never writes uncommitted IME text (Pinyin before a candidate is picked): a second
+   * pane, sync and git would see it. The save debounce below and Obsidian's own
+   * requestSave both come here; closing the file (`clear`) still writes.
+   */
+  async save(clear?: boolean): Promise<void> {
+    if (!clear && this.editor?.compositionStarted) {
+      this.saveAfterComposition = true;
+      return;
+    }
+    this.saveAfterComposition = false;
+    await super.save(clear);
+  }
+
   /** A state for `data`: the cached one when this file was open before (undo history). */
   private stateFor(data: string): EditorState {
-    const extensions = typstEditorExtensions(
-      {
-        completion: tinymistBackend(
-          () => this.plugin.lsp,
-          () => this.absolutePath(),
-          (state) => this.syncLspDoc(state.doc),
-        ),
-        inline: () => this.plugin.yolo.inline,
-        yolo: this.plugin.yolo.extension(() => this.file?.name ?? null),
-        hover: lspHoverTooltip(
-          this.plugin.app,
-          () => this.plugin.lsp,
-          () => this.absolutePath(),
-        ),
-        renderInfo: markdownInfoRenderer(
-          this.plugin.app,
-          () => this.file?.path ?? null,
-        ),
-        onEdit: (_view, changes, startDoc) => this.onEdited(changes, startDoc),
-        onUpdate: (update) => this.onUpdate(update),
-        gotoDefinition: () => void this.gotoDefinition(),
-      },
-      data,
-    );
+    const extensions = [
+      typstEditorExtensions(
+        {
+          completion: tinymistBackend(
+            () => this.plugin.lsp,
+            () => this.absolutePath(),
+            (state) => this.syncLspDoc(state.doc),
+          ),
+          inline: () => this.plugin.yolo.inline,
+          yolo: this.plugin.yolo.extension(() => this.file?.name ?? null),
+          hover: lspHoverTooltip(
+            this.plugin.app,
+            () => this.plugin.lsp,
+            () => this.absolutePath(),
+          ),
+          renderInfo: markdownInfoRenderer(
+            this.plugin.app,
+            () => this.file?.path ?? null,
+          ),
+          onEdit: (_view, changes, startDoc) => this.onEdited(changes, startDoc),
+          onUpdate: (update) => this.onUpdate(update),
+          gotoDefinition: () => void this.gotoDefinition(),
+        },
+        data,
+      ),
+      // After the editor stack, so keyArbiter stays the first extension.
+      EditorView.domEventHandlers({
+        compositionend: () => {
+          if (this.saveAfterComposition) this.scheduleSave();
+          return false;
+        },
+      }),
+    ];
     const key = this.file?.path;
     return (
       (key && this.plugin.history.restore(key, data, { extensions })) ||
@@ -236,12 +261,17 @@ export class TypstView extends TextFileView {
     // Marks the view dirty, so Obsidian merges an external change into unsaved
     // edits instead of dropping them; the short debounce below drives the preview.
     this.requestSave();
+    this.scheduleSave();
+  }
+
+  private scheduleSave(): void {
     if (this.saveTimer) clearTimeout(this.saveTimer);
     this.saveTimer = setTimeout(() => {
       this.saveTimer = null;
       void this.save().then(() => {
         const path = this.absolutePath();
-        if (path) this.plugin.lsp?.didSave(path);
+        // Not when the save was put off until the composition ends.
+        if (path && !this.saveAfterComposition) this.plugin.lsp?.didSave(path);
       });
     }, this.plugin.settings.saveDebounceMs);
   }

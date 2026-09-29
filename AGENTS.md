@@ -15,14 +15,19 @@
   requests get a `null` response and a debug log; extend explicitly when a
   feature needs it. Edits reach the server incrementally through
   `LspDocument` (`src/editor/typstEditor.ts`), never during an IME
-  composition; sync it before any request that depends on the text.
+  composition; sync it before any request that depends on the text. Panes
+  showing the same file share one server-side copy per `LspClient` (didOpen
+  for the first pane, didClose for the last), so an edit reaches the server
+  once. Saves never write while a composition is open (`TypstView.save`).
 - Editor keys: Tab, Shift-Tab, Enter, Escape, ArrowUp and ArrowDown are owned
   by `keyArbiter` (`src/editor/shared/keyArbiter.ts`), which must stay the
   FIRST extension of the editor state. Never bind these keys anywhere else
   (no `completionKeymap`, no YOLO keymap); add Enter behaviour as an arbiter
-  `enter` hook. Obsidian hotkeys that would swallow editor keys go through
-  the view's `Scope` (`registerEditorScope`); Mod-S and Mod-F keep their
-  Obsidian meaning.
+  `enter` hook. The Tab the arbiter declines is `typstTab` at the end of the
+  view keymap (nest a list item, else `indentOrInsertTab`), also passed as
+  the arbiter's `tabFallback`. Obsidian hotkeys that would swallow editor
+  keys go through the view's `Scope` (`registerEditorScope`); Mod-S and
+  Mod-F keep their Obsidian meaning.
 - `src/editor/shared/` is shared with obsidian-latex-live and must stay
   byte-identical there; this repository holds the canonical copy. Shared
   modules may only `import type` from `obsidian` (tests bundle them without
@@ -31,7 +36,9 @@
 - `src/editor/typstEditor.ts` builds the editor's extension list without
   runtime Obsidian imports so tests mount the real stack; Obsidian-only
   parts (hover, Markdown info, the YOLO bridge instance) come in through the
-  host.
+  host. Tests that need a view mount it on `tests/support/obsidian.ts`, the
+  stand-in `scripts/run-tests.mjs` aliases `obsidian` to; extend it with the
+  documented behaviour a test needs, never with Obsidian's own code.
 - Spawned processes (`tinymist lsp`, `tinymist preview`) must always be
   killed in `onunload` and view close paths. No orphan processes.
 - Desktop only (`isDesktopOnly: true`) while the binary is required. Do not

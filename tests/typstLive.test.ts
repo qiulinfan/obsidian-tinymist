@@ -179,6 +179,32 @@ test("the Typst editor stack against a real tinymist", { skip: !BIN && "tinymist
       }
     });
 
+    await t.test("$ a arrow. keeps tinymist's order: modifiers before postfix rewrites", async () => {
+      const h = await open(BASE + "$ a arrow|$\n");
+      try {
+        await type(h.view, ".", 250);
+        await usable(h.view);
+        assert.deepEqual(labels(h.view).slice(0, 2), ["b", "bar"]);
+        press(h.view, "Tab");
+        assert.equal(line(h.view), "$ a arrow.b|$");
+      } finally {
+        h.close();
+      }
+    });
+
+    await t.test('string values: "us-le filters one list, Enter inserts the whole value', async () => {
+      const h = await open(BASE + "#set page(paper: |)\n");
+      try {
+        await type(h.view, '"us-le');
+        await usable(h.view);
+        assert.ok(labels(h.view).slice(0, 3).every((l) => l.startsWith('"us-le')), labels(h.view).slice(0, 5).join(", "));
+        press(h.view, "Enter");
+        assert.match(line(h.view), /^#set page\(paper: "us-le[a-z]+\|"\)$/);
+      } finally {
+        h.close();
+      }
+    });
+
     await t.test("@ completes the document's labels", async () => {
       const h = await open(BASE + "See |\n");
       try {

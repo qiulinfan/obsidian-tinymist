@@ -7,8 +7,8 @@ import {
   closeBrackets,
   closeBracketsKeymap,
 } from "@codemirror/autocomplete";
-import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
-import { bracketMatching, getIndentUnit, indentUnit } from "@codemirror/language";
+import { defaultKeymap, history, historyKeymap, indentMore } from "@codemirror/commands";
+import { bracketMatching, getIndentUnit, indentService, indentUnit } from "@codemirror/language";
 import { lintGutter } from "@codemirror/lint";
 import { highlightSelectionMatches, searchKeymap } from "@codemirror/search";
 import {
@@ -37,6 +37,7 @@ import { semanticTokensExtension } from "./semanticTokens";
 import {
   darkThemeExtension,
   editNotifier,
+  indentOrInsertTab,
   indentTabBinding,
   indentUnitFor,
   languageData,
@@ -45,8 +46,11 @@ import {
 import { InlineSuggestions, keyArbiter } from "./shared/keyArbiter";
 import {
   ActivationInfo,
+  CompletionEdit,
   InfoRenderer,
   LspCompletionBackend,
+  LspCompletionItem,
+  defaultGlyph,
   lspCompletionSource,
   lspGlyphColumn,
   offsetToLspPos,
@@ -85,7 +89,7 @@ export function typstEditorExtensions(
   };
   return [
     // Owns Tab/Enter/Escape/arrows; must come first (see its header).
-    keyArbiter({ inline: host.inline, enter: typstListEnter }),
+    keyArbiter({ inline: host.inline, enter: typstListEnter, tabFallback: typstTab }),
     host.yolo ?? [],
     EditorState.allowMultipleSelections.of(true),
     darkThemeExtension(),
@@ -95,6 +99,7 @@ export function typstEditorExtensions(
       blockComment: { open: "/*", close: "*/" },
     }),
     indentUnitFor(text, "  "),
+    typstIndent,
     lineNumbers(),
     highlightSpecialChars(),
     history(),
@@ -125,7 +130,7 @@ export function typstEditorExtensions(
       ...defaultKeymap,
       ...searchKeymap,
       ...historyKeymap,
-      indentTabBinding,
+      { ...indentTabBinding, run: typstTab },
     ]),
     EditorView.domEventHandlers({
       mousedown: (event, view) => {
@@ -164,53 +169,86 @@ export function tinymistBackend(
   };
 }
 
+/** What one server holds for a path, shared by every pane that shows the file. */
+interface ServerDoc {
+  /** Panes attached to it: didOpen for the first, didClose for the last. */
+  refs: number;
+  /** The text the server has. */
+  synced: Text;
+}
+
+/** Each server's open files (a restarted server is a new client, so it starts empty). */
+const serverDocs = new WeakMap<LspClient, Map<string, ServerDoc>>();
+
 /**
- * The language server's copy of one open file. `sync` sends an edit's ranges when the
+ * One view's handle on the language server's copy of an open file. Panes showing the
+ * same file share that copy, so an edit reaches the server once even though the other
+ * pane replays it when it reloads the saved file. `sync` sends an edit's ranges when the
  * server holds the text the edit started from, else the full text. The server always
  * gets CodeMirror's text (LF line breaks), so positions agree whatever the file uses.
  */
 export class LspDocument {
   path: string | null = null;
-  private doc: Text | null = null;
+  private lsp: LspClient | null = null;
 
   constructor(private getLsp: () => LspClient | null) {}
 
-  /** didOpen `path`, closing the previous file; false when nothing was opened. */
+  /** Attach to `path`, releasing the previous file; false when nothing was attached. */
   open(path: string, doc: Text): boolean {
     const lsp = this.getLsp();
     if (lsp?.status !== "running") return false;
-    if (this.path === path) {
+    if (this.path === path && this.lsp === lsp) {
       this.sync(doc);
       return false;
     }
     this.close();
+    let docs = serverDocs.get(lsp);
+    if (!docs) serverDocs.set(lsp, (docs = new Map()));
+    const shared = docs.get(path);
     this.path = path;
-    this.doc = doc;
-    lsp.didOpen(path, doc.toString());
+    this.lsp = lsp;
+    if (shared) {
+      shared.refs++;
+      this.sync(doc);
+    } else {
+      docs.set(path, { refs: 1, synced: doc });
+      lsp.didOpen(path, doc.toString());
+    }
     return true;
   }
 
   sync(doc: Text, edit?: { changes: ChangeSet; startDoc: Text }): void {
     const lsp = this.getLsp();
-    if (!this.path || lsp?.status !== "running" || this.doc === doc) return;
-    if (edit && this.doc === edit.startDoc) {
+    if (!lsp || lsp !== this.lsp || !this.path || lsp.status !== "running") return;
+    const shared = serverDocs.get(lsp)?.get(this.path);
+    if (!shared || shared.synced === doc) return;
+    if (edit && (shared.synced === edit.startDoc || shared.synced.eq(edit.startDoc))) {
       lsp.didChangeRanges(this.path, lspContentChanges(edit.changes, edit.startDoc));
+    } else if (shared.synced.eq(doc)) {
+      // Another pane already sent this text (its save reloaded here). Keep that pane's
+      // document, so its next edit still goes out as ranges.
+      return;
     } else {
       lsp.didChange(this.path, doc.toString());
     }
-    this.doc = doc;
+    shared.synced = doc;
   }
 
   close(): void {
-    if (this.path) this.getLsp()?.didClose(this.path);
+    const docs = this.lsp && serverDocs.get(this.lsp);
+    const shared = this.path ? docs?.get(this.path) : undefined;
+    if (docs && shared && --shared.refs === 0) {
+      docs.delete(this.path!);
+      this.lsp!.didClose(this.path!);
+    }
     this.path = null;
-    this.doc = null;
+    this.lsp = null;
   }
 
   /** Forget the file without didClose (the server restarted). */
   reset(): void {
     this.path = null;
-    this.doc = null;
+    this.lsp = null;
   }
 }
 
@@ -350,22 +388,79 @@ export function typstActivate(ctx: CompletionContext, info: ActivationInfo): boo
   return /[(,:={]\s*$/.test(ctx.state.sliceDoc(line.from, ctx.pos - 1));
 }
 
-/** In math `_` and `-` are operators, so they end a completion word. */
-function typstValidFor(ctx: CompletionContext): CompletionResult["validFor"] {
+/**
+ * In math `_` and `-` are operators, so they end a completion word. A string-value list
+ * anchored at its opening quote (anchorAtQuote) holds every value, so it stays valid while
+ * typing inside the string.
+ */
+function typstValidFor(ctx: CompletionContext, from: number): CompletionResult["validFor"] {
+  if (quoteAnchored.has(ctx) && ctx.state.sliceDoc(from, from + 1) === '"') return /^"[^"\n]*$/;
   return inTypstMath(ctx.state.doc, ctx.pos) ? /^[A-Za-z0-9]*$/ : /^[A-Za-z0-9_-]*$/;
 }
 
+/** Requests whose string-value items anchorAtQuote re-anchored. */
+const quoteAnchored = new WeakSet<CompletionContext>();
+/** Options that are symbols (tinymist shows their glyph), for typstRank. */
+const symbols = new WeakSet<Completion>();
+
 /**
- * In math, symbols the document already uses rank first among equally good matches
- * (tinymist sorts alphabetically: `the` would otherwise pick `theorem` before `theta`).
- * The boost stays below CodeMirror's match-quality steps (100), so a better match wins.
+ * tinymist labels string values (fonts, paper sizes) with their quotes but edits them at
+ * the cursor: the bare value right after the opening quote, or, once something is typed,
+ * the value with its opening quote. Anchor both at the opening quote, the shape tinymist
+ * uses for import paths, so `"Ti` filters against `"Times New Roman"` and accepting
+ * replaces what was typed. False when `edit` is not such an edit.
  */
-function typstRank(options: Completion[], ctx: CompletionContext): Completion[] {
-  if (!inTypstMath(ctx.state.doc, ctx.pos)) return options;
+function anchorAtQuote(item: LspCompletionItem, edit: CompletionEdit, ctx: CompletionContext): boolean {
+  if (!item.label.startsWith('"') || edit.from !== ctx.pos || edit.to !== ctx.pos) return false;
+  const line = ctx.state.doc.lineAt(ctx.pos);
+  const before = ctx.state.sliceDoc(line.from, ctx.pos);
+  const at = before.lastIndexOf('"');
+  // Inside a code string: an odd number of quotes before the cursor, the last one opening.
+  if (at < 0 || before.split('"').length % 2 === 1 || !codeQuote(before, at)) return false;
+  const quote = line.from + at;
+  if (edit.text.startsWith('"')) {
+    edit.from = quote;
+  } else if (quote === ctx.pos - 1) {
+    edit.from = quote;
+    edit.text = '"' + edit.text;
+  } else {
+    return false;
+  }
+  return true;
+}
+
+function typstAugment(item: LspCompletionItem, option: Completion, edit: CompletionEdit, ctx: CompletionContext): void {
+  if (defaultGlyph(item)) symbols.add(option);
+  if (anchorAtQuote(item, edit, ctx)) quoteAnchored.add(ctx);
+}
+
+const GREEK = new Set(
+  "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau upsilon phi chi psi omega"
+    .split(" ")
+    .flatMap((g) => [g, g[0].toUpperCase() + g.slice(1)]),
+);
+
+/**
+ * Ties between equally good matches (CodeMirror's match-quality steps are 100 apart, the
+ * boosts stay below them, so a better match always wins):
+ *   - tinymist sends no sortText after `.` (modifiers first, postfix rewrites last): keep
+ *     its order instead of CodeMirror's alphabetical fallback, and boost nothing while no
+ *     word is typed;
+ *   - in math, symbols the document already uses come first, then Greek letters, then
+ *     other symbols, then functions (tinymist sorts alphabetically: `the` would otherwise
+ *     pick `theorem` from a template before `theta`).
+ */
+function typstRank(options: Completion[], ctx: CompletionContext, from: number): Completion[] {
+  if (!options.some((o) => o.sortText != null)) {
+    options.forEach((o, i) => (o.sortText = String(i).padStart(5, "0")));
+  }
+  if (from === ctx.pos || !inTypstMath(ctx.state.doc, ctx.pos)) return options;
   const usage = mathUsage(ctx.state.doc);
   for (const option of options) {
     const n = usage.get(option.label) ?? 0;
-    if (n > 0) option.boost = (option.boost ?? 0) + Math.min(12, 4 + 2 * Math.floor(Math.log2(n)));
+    let boost = n > 0 ? Math.min(12, 4 + 2 * Math.floor(Math.log2(n))) : 0;
+    if (symbols.has(option)) boost += GREEK.has(option.label) ? 2 : 1;
+    if (boost) option.boost = (option.boost ?? 0) + boost;
   }
   return options;
 }
@@ -377,6 +472,7 @@ export function typstCompletionSource(
   return lspCompletionSource(backend, {
     activate: typstActivate,
     validFor: typstValidFor,
+    augment: typstAugment,
     rank: typstRank,
     renderInfo,
   });
@@ -408,9 +504,73 @@ const typstSurround = EditorView.inputHandler.of((view, _from, _to, text) => {
   return true;
 });
 
-// ---- Enter: list continuation ------------------------------------------------------------
+/**
+ * Whether a line (the text before a break) leaves a block open: its last character outside
+ * strings, raw text and comments is `(`, `[` or `{`.
+ */
+function opensBlock(text: string): boolean {
+  let last = "";
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === "\\") {
+      i++; // an escaped character is text
+      last = ch;
+    } else if (ch === "/" && text[i + 1] === "/" && text[i - 1] !== ":") {
+      break;
+    } else if (ch === "/" && text[i + 1] === "*") {
+      const end = text.indexOf("*/", i + 2);
+      if (end < 0) break;
+      i = end + 1;
+    } else if (ch === '"' || ch === "`") {
+      const end = text.indexOf(ch, i + 1);
+      if (end < 0) return false; // the line ends inside a string or raw text
+      i = end;
+      last = ch;
+    } else if (ch !== " " && ch !== "\t") {
+      last = ch;
+    }
+  }
+  return last !== "" && "([{".includes(last);
+}
+
+/**
+ * Enter after a line that ends by opening `(`, `[` or `{` indents the new line one unit
+ * deeper; between `{|}` the closer keeps the opener's indentation (insertNewlineAndIndent
+ * splits the pair). Everywhere else CodeMirror keeps the current indentation.
+ */
+const typstIndent = indentService.of((cx, pos) => {
+  if (pos === 0) return undefined;
+  let prev = cx.lineAt(pos - 1, -1); // the text before a simulated break, or the line above
+  while (!prev.text.trim() && prev.from > 0) prev = cx.lineAt(prev.from - 1, -1);
+  if (!opensBlock(prev.text) || /^\s*[)\]}]/.test(cx.textAfterPos(pos))) return undefined;
+  return cx.lineIndent(prev.from, -1) + cx.unit;
+});
+
+// ---- Tab / Enter: lists ------------------------------------------------------------------
 
 const LIST_ITEM = /^([ \t]*)([-+]|\d+\.)([ \t]+)/;
+
+/**
+ * Tab with the cursor on a `- `, `+ ` or `1. ` list item, at or after its marker, nests
+ * the item one level (Shift-Tab's indentLess un-nests it from anywhere on the line). Not
+ * in math.
+ */
+export const typstListTab: Command = (view) => {
+  const { state } = view;
+  const range = state.selection.main;
+  if (state.selection.ranges.length > 1 || !range.empty || state.readOnly) return false;
+  const line = state.doc.lineAt(range.head);
+  const m = LIST_ITEM.exec(line.text);
+  if (!m || range.head < line.from + m[0].length || inTypstMath(state.doc, range.head)) return false;
+  return indentMore(view);
+};
+
+/**
+ * The Tab the key arbiter leaves to the view (no popup, ghost text or snippet field):
+ * nest a list item, else editorKit's indentOrInsertTab. Also the arbiter's tabFallback,
+ * so a Tab typed ahead of an empty completion does the same.
+ */
+export const typstTab: Command = (view) => typstListTab(view) || indentOrInsertTab(view);
 
 /**
  * Enter in a `- `, `+ ` or `1. ` list item continues the list (the text after the

@@ -30,9 +30,11 @@ export function previewEntry(filePath: string, vaultRoot: string): PreviewEntry 
 
 /**
  * The book entry a chapter compiles in: the nearest `main.typ` between the file's
- * folder and the vault root that mentions the file's path relative to it (e.g.
- * `#include "chapters/04-LLN.typ"`). Pinned as tinymist's main, it makes labels from
- * other chapters complete in `@` and compiles the chapter in context.
+ * folder and the vault root that includes the file (e.g. `#include
+ * "chapters/04-LLN.typ"`, relative to main.typ, or `"/..."` from the vault root; not in
+ * a comment). Pinned as tinymist's main, it makes labels from other chapters complete
+ * in `@` and compiles the chapter in context. A file main.typ does not include keeps
+ * its own diagnostics.
  */
 export function bookMain(filePath: string, vaultRoot: string): string | null {
   const root = resolve(vaultRoot);
@@ -48,7 +50,10 @@ export function bookMain(filePath: string, vaultRoot: string): string | null {
       } catch {
         // unreadable: not a book entry
       }
-      if (text.includes(relative(dir, source).split(sep).join("/"))) return main;
+      const code = text.replace(/\/\*[\s\S]*?\*\/|(?<!:)\/\/[^\n]*/g, "");
+      for (const [, path] of code.matchAll(/\binclude\s+"([^"\n]+)"/g)) {
+        if (resolve(path.startsWith("/") ? root : dir, path.replace(/^\/+/, "")) === source) return main;
+      }
     }
     if (dir === root || dirname(dir) === dir) return null;
   }
