@@ -3,16 +3,18 @@ import "./support/dom";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { forEachDiagnostic } from "@codemirror/lint";
-import { EditorView } from "@codemirror/view";
+import { EditorView, closeHoverTooltips } from "@codemirror/view";
 import { HistoryCache } from "../src/editor/shared/editorKit";
 import { YoloBridge } from "../src/editor/shared/yoloBridge";
+import { TypstRender } from "../src/editor/typstRender";
 import { TypstView } from "../src/editor/typstView";
 import { LspDiagnostic, pathToUri } from "../src/lsp/client";
 import type TinymistPlugin from "../src/main";
 import { TFile, TextFileView, WorkspaceLeaf, testApp } from "./support/obsidian";
 import { sleep } from "./support/keyMatrix";
 
-function typstView(saveDebounceMs: number) {
+/** `plugin` overrides fields of the stand-in plugin. */
+function typstView(saveDebounceMs: number, plugin: Record<string, unknown> = {}) {
   const app = testApp();
   const didSave: (string | undefined)[] = [];
   // publishDiagnostics as LspClient and the plugin deliver it: store by URI, then notify.
@@ -23,7 +25,7 @@ function typstView(saveDebounceMs: number) {
     diagnostics.set(uri, diags);
     for (const cb of diagListeners) cb(uri);
   };
-  const plugin = {
+  const stub = {
     app,
     lsp: {
       status: "stopped",
@@ -43,8 +45,10 @@ function typstView(saveDebounceMs: number) {
     syncPinnedMain: () => {},
     vaultBasePath: () => "/vault",
     preview: { cursorMoved: () => {} },
+    typstRender: null,
+    ...plugin,
   };
-  const view = new TypstView(new WorkspaceLeaf(app) as never, plugin as unknown as TinymistPlugin);
+  const view = new TypstView(new WorkspaceLeaf(app) as never, stub as unknown as TinymistPlugin);
   return { view, vault: app.vault, didSave, publish };
 }
 
@@ -233,5 +237,109 @@ test("tinymist diagnostics: leaving the typed line (a click, Enter) shows its he
     assert.deepEqual(shown(cm), ["2: unknown variable: bar", "3: unknown variable: foo"]);
   } finally {
     await view.onClose();
+  }
+});
+
+test("render hover: the formula under the pointer through the plugin's TypstRender, gated by the setting", async () => {
+  const calls: { dir: string; source: string }[] = [];
+  const typstRender = new TypstRender(
+    {
+      async render(dir, source) {
+        calls.push({ dir, source });
+        return '<svg viewBox="0 0 10 12" width="10pt" height="12pt" xmlns="http://www.w3.org/2000/svg"><path fill="#0a0b0c" d="M 0 0"/></svg>';
+      },
+    },
+    "/vault",
+  );
+  const settings = { saveDebounceMs: 100000, hoverRender: true };
+  const { view, vault } = typstView(100000, { settings, typstRender });
+  vault.files.set("a.typ", "Intro $x^2$ here\n");
+  await view.loadFile(new TFile("a.typ") as never);
+  const cm = view.cm!;
+  // A resting pointer through CodeMirror's mousemove path (jsdom has no layout).
+  const hoverAt = async (pos: number) => {
+    cm.dispatch({ effects: closeHoverTooltips });
+    Object.assign(cm, { posAtCoords: () => pos, coordsAtPos: () => ({ left: 10, right: 12, top: 0, bottom: 10 }) });
+    cm.contentDOM.querySelector(".cm-line")!.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, clientX: 11, clientY: 5 }));
+    await sleep(380);
+    return cm.dom.querySelector(".cm-tooltip-hover .lsp-render-hover .tym-fragment svg");
+  };
+  try {
+    const svg = await hoverAt(8);
+    assert.ok(svg, "rendered");
+    assert.equal(svg.querySelector("path")!.getAttribute("fill"), "currentColor");
+    assert.deepEqual(calls.map((c) => c.dir), ["/vault"]);
+    assert.ok(calls[0].source.endsWith("$x^2$\n"));
+    settings.hoverRender = false;
+    assert.equal(await hoverAt(8), null, "setting off");
+  } finally {
+    await view.onClose();
+    typstRender.dispose();
+  }
+});
+
+test("tinymist's hover: closed by typing; in a rendered formula, not a symbol's sampled values", async () => {
+  const typstRender = new TypstRender(
+    {
+      async render() {
+        return '<svg viewBox="0 0 10 12" width="10pt" height="12pt" xmlns="http://www.w3.org/2000/svg"><path fill="#0a0b0c" d="M 0 0"/></svg>';
+      },
+    },
+    "/vault",
+  );
+  const text = "Sum $integral x + EE$ and #sym.integral here\n";
+  // tinymist's answers: a symbol's sampled values, an alias's signature.
+  const hover = async (_path: string, pos: { line: number; character: number }) => {
+    const at = pos.character;
+    const word = (/[\w.]*$/.exec(text.slice(0, at))?.[0] ?? "") + (/^[\w.]*/.exec(text.slice(at))?.[0] ?? "");
+    const value = word.endsWith("EE")
+      ? "```typc\nlet EE = op;\n```"
+      : word.endsWith("integral")
+        ? '### Sampled Values\n```typc\nsymbol("∫")\n```'
+        : "";
+    return value && { contents: { kind: "markdown", value } };
+  };
+  const lsp = {
+    status: "running",
+    serverCapabilities: null,
+    completionTriggerCharacters: () => [],
+    diagnostics: () => [],
+    didOpen: () => {},
+    didChange: () => {},
+    didChangeRanges: () => {},
+    didClose: () => {},
+    didSave: () => {},
+    hover,
+  };
+  const settings = { saveDebounceMs: 100000, hoverRender: true };
+  const { view, vault } = typstView(100000, { settings, typstRender, lsp });
+  vault.files.set("a.typ", text);
+  await view.loadFile(new TFile("a.typ") as never);
+  const cm = view.cm!;
+  const sections = () =>
+    [...(cm.dom.querySelector(".cm-tooltip-hover")?.children ?? [])].map((el) =>
+      el.classList.contains("lsp-render-hover") ? "render" : el.classList.contains("tym-hover") ? "tinymist" : el.className,
+    );
+  const hoverAt = async (needle: string) => {
+    cm.dispatch({ effects: closeHoverTooltips });
+    const pos = text.indexOf(needle) + 1;
+    Object.assign(cm, { posAtCoords: () => pos, coordsAtPos: () => ({ left: 10, right: 12, top: 0, bottom: 10 }) });
+    cm.contentDOM.querySelector(".cm-line")!.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, clientX: 11, clientY: 5 }));
+    await sleep(380);
+    return sections();
+  };
+  try {
+    assert.deepEqual(await hoverAt("integral x"), ["render"], "the render shows the symbol");
+    assert.deepEqual(await hoverAt("EE$"), ["render", "tinymist"], "an alias's signature stays");
+    assert.deepEqual(await hoverAt("integral here"), ["tinymist"], "outside math");
+    // Typing closes tinymist's section as it closes the render's.
+    cm.dispatch({ changes: { from: text.length - 1, insert: "!" }, userEvent: "input.type" });
+    await sleep(50);
+    assert.deepEqual(sections(), []);
+    settings.hoverRender = false;
+    assert.deepEqual(await hoverAt("integral x"), ["tinymist"], "no render: tinymist's answer is all there is");
+  } finally {
+    await view.onClose();
+    typstRender.dispose();
   }
 });

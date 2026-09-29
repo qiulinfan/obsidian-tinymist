@@ -34,6 +34,8 @@ import {
   tinymistBackend,
   typstEditorExtensions,
 } from "./typstEditor";
+import { typstMathAt } from "./typstFragment";
+import { typstRenderHover } from "./typstRender";
 
 interface LspRangeLike {
   start: { line: number; character: number };
@@ -230,11 +232,24 @@ export class TypstView extends TextFileView {
           ),
           inline: () => this.plugin.yolo.inline,
           yolo: this.plugin.yolo.extension(() => this.file?.name ?? null),
-          hover: lspHoverTooltip(
-            this.plugin.app,
-            () => this.plugin.lsp,
-            () => this.absolutePath(),
-          ),
+          // The formula's render first, then tinymist's text hover (signatures of aliases).
+          hover: [
+            typstRenderHover({
+              renderer: () => this.plugin.typstRender,
+              path: () => this.absolutePath(),
+              enabled: () => this.plugin.settings.hoverRender,
+            }),
+            lspHoverTooltip(
+              this.plugin.app,
+              () => this.plugin.lsp,
+              () => this.absolutePath(),
+              // In a rendered formula a symbol's sampled values only repeat the render.
+              (state, pos, md) =>
+                this.plugin.settings.hoverRender &&
+                md.startsWith("### Sampled Values") &&
+                typstMathAt(state.doc, pos) !== null,
+            ),
+          ],
           renderInfo: markdownInfoRenderer(
             this.plugin.app,
             () => this.file?.path ?? null,

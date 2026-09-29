@@ -12,6 +12,8 @@ export interface TinymistSettings {
   yoloTabCompletion: boolean;
   /** Compile a chapter through the book main.typ that includes it. */
   pinBookMain: boolean;
+  /** Render the formula under the pointer above tinymist's hover. */
+  hoverRender: boolean;
 }
 
 export const DEFAULT_SETTINGS: TinymistSettings = {
@@ -20,6 +22,7 @@ export const DEFAULT_SETTINGS: TinymistSettings = {
   invertPreviewColors: "never",
   yoloTabCompletion: false,
   pinBookMain: true,
+  hoverRender: true,
 };
 
 export class TinymistSettingTab extends PluginSettingTab {
@@ -117,6 +120,27 @@ export class TinymistSettingTab extends PluginSettingTab {
               value === "auto" ? "auto" : "never";
             await this.plugin.saveSettings();
             this.plugin.preview.stop();
+          }),
+      );
+
+    new Setting(containerEl).setName("Rendering").setHeading();
+
+    new Setting(containerEl)
+      .setName("Render formulas on hover")
+      .setDesc(
+        "When the pointer rests on math, show the rendered formula above tinymist's " +
+          "hover. A second tinymist process renders it from the unsaved text with the " +
+          "book main's imports and rules (the lines before it includes the chapter) and " +
+          "the file's own definitions above the formula. A .tinymist-fragment.typ file " +
+          "in the file's folder or above replaces the book main's part, e.g. to set the " +
+          "fonts a template applies inside its #show rule.",
+      )
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.hoverRender)
+          .onChange(async (value) => {
+            this.plugin.settings.hoverRender = value;
+            await this.plugin.saveSettings();
           }),
       );
   }

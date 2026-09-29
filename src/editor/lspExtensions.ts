@@ -53,10 +53,15 @@ function hoverToMarkdown(contents: LspHover["contents"]): string {
     : one(contents);
 }
 
+/**
+ * tinymist's text hover, closed by an edit or a selection change like the render hover
+ * above it. `skip` drops an answer (its Markdown) at `pos`.
+ */
 export function lspHoverTooltip(
   app: App,
   getLsp: () => LspClient | null,
   getPath: () => string | null,
+  skip?: (state: EditorState, pos: number, markdown: string) => boolean,
 ) {
   return hoverTooltip(
     async (view, pos): Promise<Tooltip | null> => {
@@ -74,7 +79,7 @@ export function lspHoverTooltip(
       }
       if (!hv?.contents) return null;
       const md = hoverToMarkdown(hv.contents);
-      if (!md.trim()) return null;
+      if (!md.trim() || skip?.(view.state, pos, md)) return null;
       let from = pos;
       let to = pos;
       if (hv.range) {
@@ -95,7 +100,7 @@ export function lspHoverTooltip(
         },
       };
     },
-    { hoverTime: 300 },
+    { hoverTime: 300, hideOnChange: true },
   );
 }
 

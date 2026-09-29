@@ -9,13 +9,16 @@ import {
   Modal,
   Notice,
   Plugin,
+  TAbstractFile,
   TFile,
   WorkspaceLeaf,
 } from "obsidian";
 import { HistoryCache } from "./editor/shared/editorKit";
 import { YoloBridge } from "./editor/shared/yoloBridge";
+import { TypstRender } from "./editor/typstRender";
 import { LspTextEdit, TypstView, VIEW_TYPE_TYPST } from "./editor/typstView";
 import { LspClient, LspStatus, uriToPath } from "./lsp/client";
+import { TypstFragmentRenderer } from "./lsp/fragmentRenderer";
 import { bookMain } from "./preview/previewEntry";
 import { PreviewManager, SourceJump } from "./preview/previewManager";
 import { PreviewView, VIEW_TYPE_TYPST_PREVIEW } from "./preview/previewView";
@@ -33,6 +36,10 @@ export default class TinymistPlugin extends Plugin {
   history = new HistoryCache();
   /** YOLO AI completion in our editors; one per plugin, shared by every view. */
   yolo!: YoloBridge;
+  /** The second `tinymist lsp` that renders formulas (null without a vault folder). */
+  fragments: TypstFragmentRenderer | null = null;
+  /** Formula renders for the hover, cached across views. */
+  typstRender: TypstRender | null = null;
 
   private diagListeners = new Set<(uri: string) => void>();
   private statusBarEl: HTMLElement | null = null;
@@ -44,6 +51,11 @@ export default class TinymistPlugin extends Plugin {
       name: "tinymist",
       enabled: () => this.settings.yoloTabCompletion,
     });
+    const root = this.vaultBasePath();
+    if (root) {
+      this.fragments = new TypstFragmentRenderer({ bin: () => this.resolveBinary(), root });
+      this.typstRender = new TypstRender(this.fragments, root);
+    }
 
     this.registerView(VIEW_TYPE_TYPST, (leaf) => new TypstView(leaf, this));
     this.registerView(
@@ -143,7 +155,30 @@ export default class TinymistPlugin extends Plugin {
       this.app.workspace.on("active-leaf-change", () => this.syncPinnedMain()),
     );
 
-    this.app.workspace.onLayoutReady(() => void this.startLsp(false));
+    this.app.workspace.onLayoutReady(() => {
+      void this.startLsp(false);
+      // Formula renders depend on the files their preamble imports (templates, alias
+      // files). Registered after layout-ready, so the vault's initial create events do not
+      // count; a folder counts when it goes or moves (it may hold .typ files).
+      const typ = (file: TAbstractFile) => !(file instanceof TFile) || file.extension === "typ";
+      const changed = (...paths: string[]) => {
+        const root = this.vaultBasePath();
+        if (root) for (const p of paths) this.typstRender?.fileChanged(join(root, p));
+      };
+      this.registerEvent(
+        this.app.vault.on("modify", (file) => file instanceof TFile && typ(file) && changed(file.path)),
+      );
+      this.registerEvent(
+        this.app.vault.on("create", (file) => file instanceof TFile && typ(file) && changed(file.path)),
+      );
+      this.registerEvent(this.app.vault.on("delete", (file) => typ(file) && changed(file.path)));
+      this.registerEvent(
+        this.app.vault.on(
+          "rename",
+          (file, oldPath) => (typ(file) || oldPath.endsWith(".typ")) && changed(file.path, oldPath),
+        ),
+      );
+    });
   }
 
   onunload(): void {
@@ -151,6 +186,8 @@ export default class TinymistPlugin extends Plugin {
     this.lsp?.stop();
     this.lsp = null;
     this.preview.stop();
+    this.fragments?.dispose();
+    this.typstRender?.dispose();
   }
 
   async loadSettings(): Promise<void> {
@@ -159,6 +196,8 @@ export default class TinymistPlugin extends Plugin {
 
   async saveSettings(): Promise<void> {
     this.resolvedBinary = undefined;
+    // The renderer restarts with the (possibly new) binary at its next render.
+    this.fragments?.stop();
     await this.saveData(this.settings);
   }
 

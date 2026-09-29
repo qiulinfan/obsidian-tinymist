@@ -52,6 +52,12 @@ export interface LspContentChange {
   text: string;
 }
 
+/** `tinymist.exportSvg`'s result when nothing is written: one base64 SVG per page (0-based). */
+export interface ExportSvgResult {
+  items?: { page: number; data: string | null }[];
+  total_pages?: number;
+}
+
 interface Pending {
   resolve: (v: unknown) => void;
   reject: (e: Error) => void;
@@ -95,6 +101,11 @@ export class LspClient {
     return this.diagnosticsByUri.get(uri) ?? [];
   }
 
+  /** The server's process id while it runs. */
+  get pid(): number | null {
+    return this.proc?.pid ?? null;
+  }
+
   async start(): Promise<void> {
     this.setStatus("starting");
     this.proc = spawn(this.binPath, ["lsp"], {
@@ -104,6 +115,8 @@ export class LspClient {
     this.proc.on("error", (err) => {
       console.error("[tinymist] spawn failed:", err);
       this.setStatus("failed");
+      // A process that never started emits no exit: fail its initialize now, not at the timeout.
+      this.rejectAll(new Error(`could not start tinymist: ${err.message}`));
     });
     this.proc.on("exit", (code) => {
       if (this.status !== "stopped") {
@@ -190,7 +203,8 @@ export class LspClient {
       this.notify("initialized", {});
       this.setStatus("running");
     } catch (err) {
-      this.setStatus("failed");
+      // stop() during the start ended it: stopped, not failed.
+      if (this.status !== "stopped") this.setStatus("failed");
       const proc = this.proc;
       this.proc = null;
       if (proc && !proc.killed) proc.kill();
@@ -341,6 +355,20 @@ export class LspClient {
       { textDocument: { uri: pathToUri(path) } },
       10000,
     );
+  }
+
+  /**
+   * Compile `path` (an open document's text) and return its pages as SVG, never
+   * writing a file. The actions object `{write: false}` must be the THIRD argument:
+   * as the second it is ignored, `data` comes back null and tinymist writes
+   * `<name>.svg` next to the source.
+   */
+  exportSvg(
+    path: string,
+    opts: Record<string, unknown> = {},
+    timeoutMs = 15000,
+  ): Promise<ExportSvgResult | null> {
+    return this.executeCommand("tinymist.exportSvg", [path, opts, { write: false }], timeoutMs);
   }
 
   executeCommand<T = unknown>(
