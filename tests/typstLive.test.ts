@@ -1,7 +1,7 @@
 // The Typst editor's real extension stack (typstEditorExtensions) against a real
 // tinymist in jsdom: completion, smart Enter, snippets, postfix edits, labels, the
 // incremental document sync, the book-main pin (also across a preview configuration
-// change) and the key arbiter with a fake YOLO.
+// change), the key arbiter with a fake YOLO, and TypstView's diagnostics while typing.
 // Skipped when no tinymist binary is found (TINYMIST_BIN overrides the lookup).
 import "./support/dom";
 import assert from "node:assert/strict";
@@ -14,19 +14,24 @@ import {
   currentCompletions,
   selectedCompletionIndex,
 } from "@codemirror/autocomplete";
+import { forEachDiagnostic } from "@codemirror/lint";
 import { EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import type { App } from "obsidian";
+import { HistoryCache } from "../src/editor/shared/editorKit";
 import { YoloBridge, YoloEditorShim } from "../src/editor/shared/yoloBridge";
 import {
   LspDocument,
   tinymistBackend,
   typstEditorExtensions,
 } from "../src/editor/typstEditor";
-import { LspClient } from "../src/lsp/client";
+import { TypstView } from "../src/editor/typstView";
+import { LspClient, pathToUri } from "../src/lsp/client";
+import type TinymistPlugin from "../src/main";
 import { bookMain } from "../src/preview/previewEntry";
 import { fakeYolo } from "./support/fakeYolo";
 import { press, quietSettings, sleep, waitFor } from "./support/keyMatrix";
+import { TFile, WorkspaceLeaf, testApp } from "./support/obsidian";
 
 const BIN =
   process.env.TINYMIST_BIN ??
@@ -54,7 +59,9 @@ test("the Typst editor stack against a real tinymist", { skip: !BIN && "tinymist
   writeFileSync(file, BASE);
   const debug = console.debug;
   console.debug = () => {}; // the client forwards tinymist's stderr log here
-  const lsp = new LspClient(BIN!, root, () => {});
+  // publishDiagnostics reaches TypstView through the plugin's listeners (main.ts).
+  const diagListeners = new Set<(uri: string) => void>();
+  const lsp = new LspClient(BIN!, root, (uri) => diagListeners.forEach((cb) => cb(uri)));
   let full = 0;
   let ranges = 0;
   const didChange = lsp.didChange.bind(lsp);
@@ -273,6 +280,69 @@ test("the Typst editor stack against a real tinymist", { skip: !BIN && "tinymist
       }
     });
 
+    await t.test("@ label rows describe figures as 'Figure · A box', not ': A boxFigure'", async () => {
+      const h = await open(
+        BASE +
+          "#figure(rect(width: 2cm), caption: [A box]) <fig:box>\n" +
+          "= Measure theory <sec:measure>\n" +
+          "See |\n",
+      );
+      try {
+        await type(h.view, "@");
+        await usable(h.view);
+        const detail = (label: string) => currentCompletions(h.view.state).find((c) => c.label === label)?.detail;
+        assert.equal(detail("fig:box"), "Figure · A box");
+        assert.equal(detail("sec:measure"), "Measure theory");
+        // The rendered popup rows: the label, then the description; no glyph for labels.
+        await waitFor(() => !!h.view.dom.querySelector(".cm-tooltip-autocomplete li"), 2000);
+        const rows = [...h.view.dom.querySelectorAll(".cm-tooltip-autocomplete li")].map((li) =>
+          [".cm-completionLabel", ".cm-completionDetail"].map((c) => li.querySelector(c)?.textContent ?? ""),
+        );
+        assert.deepEqual(rows.find(([l]) => l === "fig:box"), ["fig:box", "Figure · A box"], JSON.stringify(rows));
+        assert.deepEqual(rows.find(([l]) => l === "sec:measure"), ["sec:measure", "Measure theory"]);
+        assert.ok(!h.view.dom.querySelector(".cm-tooltip-autocomplete")!.textContent!.includes(": A box"));
+      } finally {
+        h.close();
+      }
+    });
+
+    await t.test("@ label rows cut caption and supplement only where that is certain", async () => {
+      // A chapter the document includes, and a bibliography with a title that starts like a caption.
+      writeFileSync(
+        join(root, "chap.typ"),
+        "#figure(rect(), caption: [Chapter box]) <c:box>\n" +
+          "#figure(rect(), caption: [Performance of JavaScript], supplement: none) <c:js>\n",
+      );
+      writeFileSync(
+        join(root, "refs.bib"),
+        "@book{knuth84, title = {Literate Programming}, author = {Knuth, Donald}, year = {1984}}\n" +
+          "@manual{colon, title = {: A Document Preparation SystemManual}, author = {Lamport, Leslie}, year = {1994}}\n",
+      );
+      const h = await open(
+        BASE +
+          '#include "chap.typ"\n' +
+          "#figure(rect(), caption: [Performance of JavaScript], supplement: none) <fig:js>\n" +
+          "#figure(rect(), caption: [A box], supplement: [Supplementary Figure]) <fig:multi>\n" +
+          "#block[: starts with colon] <blk:colon>\n" +
+          '#bibliography("refs.bib")\n' +
+          "See |\n",
+      );
+      try {
+        await type(h.view, "@");
+        await usable(h.view);
+        const detail = (label: string) => currentCompletions(h.view.state).find((c) => c.label === label)?.detail;
+        assert.equal(detail("c:box"), "Figure · Chapter box");
+        assert.equal(detail("c:js"), "Performance of JavaScript");
+        assert.equal(detail("fig:js"), "Performance of JavaScript");
+        assert.equal(detail("fig:multi"), "Supplementary Figure · A box");
+        assert.equal(detail("blk:colon"), ": starts with colon");
+        assert.equal(detail("knuth84"), "Literate Programming");
+        assert.equal(detail("colon"), ": A Document Preparation SystemManual");
+      } finally {
+        h.close();
+      }
+    });
+
     await t.test("edits reach the server incrementally", () => {
       assert.ok(ranges > 10, `incremental: ${ranges}`);
       assert.equal(full, 0);
@@ -333,6 +403,97 @@ test("the Typst editor stack against a real tinymist", { skip: !BIN && "tinymist
         assert.deepEqual(h.yolo.hijacked, []); // YOLO's own keymap is never mounted
       } finally {
         h.close();
+      }
+    });
+
+    await t.test("TypstView: tinymist's per-keystroke errors on the typed line wait for a pause", async () => {
+      const name = "diag.typ";
+      const text = "= Diagnostics\n\n#nosuchname\n";
+      writeFileSync(join(root, name), text);
+      const app = testApp();
+      app.vault.files.set(name, text);
+      const yolo = new YoloBridge(app as never, { name: "test", enabled: () => false });
+      const plugin = {
+        app,
+        lsp,
+        settings: { saveDebounceMs: 100000 },
+        history: new HistoryCache(),
+        yolo,
+        onDiagnostics: (cb: (uri: string) => void) => {
+          diagListeners.add(cb);
+          return () => diagListeners.delete(cb);
+        },
+        openPreview: async () => {},
+        togglePreview: async () => {},
+        syncPinnedMain: () => {},
+        vaultBasePath: () => root,
+        preview: { cursorMoved: () => {} },
+      };
+      const view = new TypstView(new WorkspaceLeaf(app) as never, plugin as unknown as TinymistPlugin);
+      const uri = pathToUri(join(root, name));
+      /** What tinymist last published and what the editor's lint layer shows, as "line: message" (no hints). */
+      const first = (message: string) => message.split("\n")[0];
+      const published = () =>
+        lsp.diagnostics(uri).map((d) => `${d.range.start.line + 1}: ${first(d.message)}`).sort();
+      const shown = () => {
+        const out: string[] = [];
+        const cm = view.cm!;
+        forEachDiagnostic(cm.state, (d, from) => out.push(`${cm.state.doc.lineAt(from).number}: ${first(d.message)}`));
+        return out.sort();
+      };
+      // Typing happens on line 2; line 3 holds an error from the start.
+      const typed = (list: string[]) => list.filter((d) => d.startsWith("2: "));
+      const elsewhere = (list: string[]) => list.filter((d) => !d.startsWith("2: "));
+      const other = "3: unknown variable: nosuchname";
+      try {
+        await view.loadFile(new TFile(name) as never);
+        const cm = view.cm!;
+        await waitFor(() => shown().includes(other), 10000);
+        cm.focus();
+        cm.dispatch({ selection: { anchor: cm.state.doc.line(2).from } });
+
+        // `#fo` typed with 150 ms gaps: tinymist reports each half-typed name at once.
+        let held = 0;
+        let lastKey = 0;
+        for (const ch of "#fo") {
+          await type(cm, ch, 0);
+          lastKey = Date.now();
+          for (let i = 0; i < 6; i++) {
+            await sleep(25);
+            if (typed(published()).length) held++;
+            assert.deepEqual(typed(shown()), [], `while typing: ${published().join("; ")}`);
+            // Other lines follow tinymist at once (it drops line 3's error while line 2 fails).
+            assert.deepEqual(elsewhere(shown()), elsewhere(published()));
+          }
+        }
+        assert.ok(held > 0, "tinymist published errors for the typed line");
+        await waitFor(() => typed(shown()).length > 0, 5000);
+        const paused = Date.now() - lastKey;
+        assert.ok(paused >= 1400, `shown after a ${paused} ms pause`);
+        assert.deepEqual(typed(shown()), ["2: unknown variable: fo"]);
+
+        // Typing on: the stale error goes with tinymist's next publish, the new one waits.
+        await type(cm, "o", 0);
+        await waitFor(() => published().includes("2: unknown variable: foo"), 5000);
+        assert.deepEqual(typed(shown()), []);
+        assert.deepEqual(elsewhere(shown()), elsewhere(published()));
+        cm.dispatch({ selection: { anchor: 2 } }); // a click on line 1
+        await Promise.resolve();
+        assert.deepEqual(typed(shown()), ["2: unknown variable: foo"], "leaving the line shows it");
+
+        // Fixing the line while typing on it: its error goes as soon as tinymist drops it,
+        // and line 3's error, back in the same publish, shows at once.
+        const l2 = cm.state.doc.line(2);
+        cm.dispatch({
+          changes: { from: l2.from, to: l2.to, insert: "#let foo = 1" },
+          selection: { anchor: l2.from + 12 },
+          userEvent: "input.type",
+        });
+        await waitFor(() => typed(published()).length === 0 && published().includes(other), 5000);
+        assert.deepEqual(shown(), [other]);
+      } finally {
+        await view.onClose();
+        yolo.destroy();
       }
     });
   } finally {

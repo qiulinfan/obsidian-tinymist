@@ -1,4 +1,3 @@
-import { setDiagnostics } from "@codemirror/lint";
 import { ChangeSet, EditorState, Text } from "@codemirror/state";
 import { EditorView, ViewUpdate } from "@codemirror/view";
 import { join } from "path";
@@ -26,6 +25,7 @@ import {
   getEphemeralState,
   registerEditorScope,
   setDocText,
+  setTypingDiagnostics,
   showSearch,
   syncDarkTheme,
 } from "./shared/editorKit";
@@ -489,13 +489,17 @@ export class TypstView extends TextFileView {
     if (this.lspFile.path === this.absolutePath()) this.lspFile.sync(doc, edit);
   }
 
+  /**
+   * The server's current diagnostics for the open file, into the editor's lint layer only
+   * (never `setDiagnostics` directly): new ones on the line being typed wait for a pause
+   * or for the cursor to leave the line (typingDiagnostics), so tinymist's per-keystroke
+   * publishes do not flash while typing.
+   */
   private applyDiagnostics(uri: string): void {
     const path = this.absolutePath();
     if (!path || !this.editor) return;
     if (uri !== pathToUri(path)) return;
     const diags = this.plugin.lsp?.diagnostics(uri) ?? [];
-    this.editor.dispatch(
-      setDiagnostics(this.editor.state, lspDiagnosticsToCm(this.editor.state, diags)),
-    );
+    setTypingDiagnostics(this.editor, lspDiagnosticsToCm(this.editor.state, diags));
   }
 }

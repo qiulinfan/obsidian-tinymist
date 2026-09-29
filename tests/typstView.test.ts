@@ -2,10 +2,12 @@
 import "./support/dom";
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { forEachDiagnostic } from "@codemirror/lint";
 import { EditorView } from "@codemirror/view";
 import { HistoryCache } from "../src/editor/shared/editorKit";
 import { YoloBridge } from "../src/editor/shared/yoloBridge";
 import { TypstView } from "../src/editor/typstView";
+import { LspDiagnostic, pathToUri } from "../src/lsp/client";
 import type TinymistPlugin from "../src/main";
 import { TFile, TextFileView, WorkspaceLeaf, testApp } from "./support/obsidian";
 import { sleep } from "./support/keyMatrix";
@@ -13,17 +15,29 @@ import { sleep } from "./support/keyMatrix";
 function typstView(saveDebounceMs: number) {
   const app = testApp();
   const didSave: (string | undefined)[] = [];
+  // publishDiagnostics as LspClient and the plugin deliver it: store by URI, then notify.
+  const diagnostics = new Map<string, LspDiagnostic[]>();
+  const diagListeners = new Set<(uri: string) => void>();
+  const publish = (path: string, diags: LspDiagnostic[]) => {
+    const uri = pathToUri(`/vault/${path}`);
+    diagnostics.set(uri, diags);
+    for (const cb of diagListeners) cb(uri);
+  };
   const plugin = {
     app,
     lsp: {
       status: "stopped",
       completionTriggerCharacters: () => [],
       didSave: () => didSave.push(app.vault.files.get("a.typ")),
+      diagnostics: (uri: string) => diagnostics.get(uri) ?? [],
     },
     settings: { saveDebounceMs },
     history: new HistoryCache(),
     yolo: new YoloBridge(app as never, { name: "test", enabled: () => false }),
-    onDiagnostics: () => () => {},
+    onDiagnostics: (cb: (uri: string) => void) => {
+      diagListeners.add(cb);
+      return () => diagListeners.delete(cb);
+    },
     openPreview: async () => {},
     togglePreview: async () => {},
     syncPinnedMain: () => {},
@@ -31,7 +45,7 @@ function typstView(saveDebounceMs: number) {
     preview: { cursorMoved: () => {} },
   };
   const view = new TypstView(new WorkspaceLeaf(app) as never, plugin as unknown as TinymistPlugin);
-  return { view, vault: app.vault, didSave };
+  return { view, vault: app.vault, didSave, publish };
 }
 
 function insert(cm: EditorView, from: number, to: number, text: string, compose: boolean) {
@@ -113,6 +127,110 @@ test("a CRLF file stays CRLF: opening it and switching away never rewrites it; s
     view.setViewData("b\r\nc\r\nd\r\n", false);
     assert.equal(view.cm!.state.doc.toString(), "b\nc\nd\n");
     assert.equal(view.getViewData(), "b\r\nc\r\nd\r\n");
+  } finally {
+    await view.onClose();
+  }
+});
+
+// ---- diagnostics while typing -----------------------------------------------------------------
+
+/** An LSP error on 0-based `line`, characters `from`..`to`. */
+const lspError = (line: number, from: number, to: number, message: string): LspDiagnostic => ({
+  range: { start: { line, character: from }, end: { line, character: to } },
+  severity: 1,
+  message,
+  source: "typst",
+});
+
+/** The editor's lint layer as "line: message", sorted. */
+function shown(cm: EditorView): string[] {
+  const out: string[] = [];
+  forEachDiagnostic(cm.state, (d, from) => out.push(`${cm.state.doc.lineAt(from).number}: ${d.message}`));
+  return out.sort();
+}
+
+/** Type `text` at the cursor one character at a time, as a keystroke would. */
+function typeAtCursor(cm: EditorView, text: string) {
+  for (const ch of text) {
+    const at = cm.state.selection.main.head;
+    insert(cm, at, at, ch, false);
+  }
+}
+
+test("tinymist diagnostics: a new one on the line being typed waits for a ~1.5 s pause; other lines show at once", async () => {
+  const { view, vault, publish } = typstView(100000);
+  vault.files.set("a.typ", "= Title\n#let x = y\n\n");
+  await view.loadFile(new TFile("a.typ") as never);
+  const cm = view.cm!;
+  const other = lspError(1, 9, 10, "unknown variable: y");
+  try {
+    publish("a.typ", [other]);
+    assert.deepEqual(shown(cm), ["2: unknown variable: y"], "nothing typed: shown at once");
+
+    // tinymist publishes after every keystroke on line 3.
+    cm.dispatch({ selection: { anchor: cm.state.doc.line(3).from } });
+    typeAtCursor(cm, "#f");
+    publish("a.typ", [other, lspError(2, 1, 2, "unknown variable: f")]);
+    assert.deepEqual(shown(cm), ["2: unknown variable: y"], "line 3 held, line 2 still shown");
+    await sleep(300);
+    typeAtCursor(cm, "o");
+    publish("a.typ", [other, lspError(2, 1, 3, "unknown variable: fo")]);
+    assert.deepEqual(shown(cm), ["2: unknown variable: y"]);
+
+    // A diagnostic on another line appears and goes at once while line 3 is being typed.
+    publish("a.typ", [lspError(0, 2, 7, "a warning elsewhere"), other, lspError(2, 1, 3, "unknown variable: fo")]);
+    assert.deepEqual(shown(cm), ["1: a warning elsewhere", "2: unknown variable: y"]);
+    publish("a.typ", [lspError(2, 1, 3, "unknown variable: fo")]);
+    assert.deepEqual(shown(cm), [], "fixed elsewhere: removed at once");
+    await sleep(1000);
+    assert.deepEqual(shown(cm), [], "still inside the pause");
+    await sleep(700);
+    assert.deepEqual(shown(cm), ["3: unknown variable: fo"], "the pause reveals it");
+
+    // Typing on: the stale error goes at once, the new one waits again.
+    typeAtCursor(cm, "o");
+    publish("a.typ", [lspError(2, 1, 4, "unknown variable: foo")]);
+    assert.deepEqual(shown(cm), []);
+    // The error on the cursor line disappears (fixed): removed at once, nothing comes back.
+    typeAtCursor(cm, "t");
+    publish("a.typ", []);
+    await sleep(1700);
+    assert.deepEqual(shown(cm), []);
+  } finally {
+    await view.onClose();
+  }
+});
+
+test("tinymist diagnostics: leaving the typed line (a click, Enter) shows its held ones at once", async () => {
+  const { view, vault, publish } = typstView(100000);
+  vault.files.set("a.typ", "= Title\n\n");
+  await view.loadFile(new TFile("a.typ") as never);
+  const cm = view.cm!;
+  const bar = lspError(1, 1, 4, "unknown variable: bar");
+  try {
+    // A change from outside (another pane's save) on the cursor line is not typing.
+    cm.dispatch({ selection: { anchor: cm.state.doc.line(2).from } });
+    view.setViewData("= Title\n#bar\n", false);
+    publish("a.typ", [bar]);
+    assert.deepEqual(shown(cm), ["2: unknown variable: bar"]);
+
+    cm.dispatch({ selection: { anchor: cm.state.doc.line(3).from } });
+    typeAtCursor(cm, "#fo");
+    publish("a.typ", [bar, lspError(2, 1, 3, "unknown variable: fo")]);
+    assert.deepEqual(shown(cm), ["2: unknown variable: bar"]);
+    cm.dispatch({ selection: { anchor: 2 } }); // a click on line 1
+    await Promise.resolve();
+    assert.deepEqual(shown(cm), ["2: unknown variable: bar", "3: unknown variable: fo"]);
+
+    // Back on line 3, typing again; Enter moves the cursor off the line.
+    cm.dispatch({ selection: { anchor: cm.state.doc.line(3).to } });
+    typeAtCursor(cm, "o");
+    publish("a.typ", [bar, lspError(2, 1, 4, "unknown variable: foo")]);
+    assert.deepEqual(shown(cm), ["2: unknown variable: bar"], "the stale error went at once");
+    const end = cm.state.doc.line(3).to;
+    cm.dispatch({ changes: { from: end, insert: "\n" }, selection: { anchor: end + 1 }, userEvent: "input" });
+    await Promise.resolve();
+    assert.deepEqual(shown(cm), ["2: unknown variable: bar", "3: unknown variable: foo"]);
   } finally {
     await view.onClose();
   }

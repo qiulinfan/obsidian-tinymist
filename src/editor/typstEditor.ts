@@ -43,6 +43,7 @@ import {
   indentUnitFor,
   languageData,
   mathInput,
+  typingDiagnostics,
 } from "./shared/editorKit";
 import { InlineSuggestions, keyArbiter } from "./shared/keyArbiter";
 import {
@@ -122,6 +123,9 @@ export function typstEditorExtensions(
     typstHighlightPlugin,
     semanticTokensExtension,
     lintGutter(),
+    // tinymist publishes per keystroke: new diagnostics on the line being typed wait for a
+    // pause (TypstView sets them through setTypingDiagnostics).
+    typingDiagnostics(),
     // Its own keymap stays (Ctrl-Space, Alt-`, PageUp/Down); keyArbiter runs first.
     autocompletion({
       override: [typstCompletionSource(host.completion, host.renderInfo)],

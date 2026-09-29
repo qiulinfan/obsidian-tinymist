@@ -22,6 +22,10 @@
   `TypstView` keeps a CRLF file CRLF (CodeMirror and the server hold LF;
   `getViewData` converts back), so opening a file and switching away never
   rewrites it.
+- Editor diagnostics go only through `setTypingDiagnostics` (editorKit;
+  `TypstView.applyDiagnostics`), never `setDiagnostics` on the editor:
+  `typingDiagnostics()` holds new ones on the line being typed until a pause
+  or the cursor leaves it.
 - Editor keys: Tab, Shift-Tab, Enter, Escape, ArrowUp and ArrowDown are owned
   by `keyArbiter` (`src/editor/shared/keyArbiter.ts`), which must stay the
   FIRST extension of the editor state. Enter accepts a completion only when
