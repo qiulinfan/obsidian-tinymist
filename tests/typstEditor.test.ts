@@ -669,6 +669,24 @@ test("semantic tokens: edited lines fall back to the baseline tokenizer until th
   }
 });
 
+test("baseline tokenizer: escapes are text; an escaped dollar opens no math, in markup or math", () => {
+  const doc = ["Price \\$5 and \\#x, not math.", "= Heading", "$a \\$ b$ after", "tail *strong*"].join("\n");
+  const view = new EditorView({
+    state: EditorState.create({ doc, extensions: [typstHighlightPlugin] }),
+    parent: document.body,
+  });
+  const spans = (line: number) =>
+    [...view.contentDOM.querySelectorAll(".cm-line")[line].querySelectorAll("span")].map((s) => `${s.className} ${s.textContent}`);
+  try {
+    assert.deepEqual(spans(0), []);
+    assert.deepEqual(spans(1), ["tym-heading = Heading"]);
+    assert.deepEqual(spans(2), ["tym-keyword $", "tym-math a \\$ b", "tym-keyword $"]);
+    assert.deepEqual(spans(3), ["tym-strong *strong*"]);
+  } finally {
+    view.destroy();
+  }
+});
+
 // ---- plugin plumbing -----------------------------------------------------------------------------
 
 test("bookMain: the nearest main.typ that includes the chapter", () => {

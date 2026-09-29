@@ -17,6 +17,7 @@ import {
   projectStatements,
   readSvg,
   topLevelStatements,
+  typFilesNamed,
   typstMathAt,
 } from "../src/editor/typstFragment";
 import { FRAGMENT_DOC, typstExportError } from "../src/lsp/fragmentRenderer";
@@ -285,6 +286,22 @@ test("readSvg: size, baseline, marker stripped, theme ink and prefixed ids", () 
   assert.equal(readSvg("<html></html>", "f-"), null);
 });
 
+test("typFilesNamed: quoted .typ paths, relative to the file or root-absolute; never packages", () => {
+  const text = [
+    '#import "../template.typ": *',
+    '#import "/book/alias.typ"',
+    '#import "@preview/cetz:0.5.2"',
+    '#let data = read("notes.typ") + yaml("meta.yaml")',
+    '#include "ch2.typ"',
+  ].join("\n");
+  assert.deepEqual(typFilesNamed(text, file("chapters"), ROOT), [
+    file("template.typ"),
+    file("alias.typ"),
+    file("chapters/notes.typ"),
+    file("chapters/ch2.typ"),
+  ]);
+});
+
 test("typstExportError: Typst's messages and hints from a failed export, located outside the fragment", () => {
   const frag = join(BOOK, "chapters", FRAGMENT_DOC);
   // The shape tinymist 0.15 answers with (a Rust debug string inside the JSON-RPC error).
@@ -306,6 +323,21 @@ test("typstExportError: Typst's messages and hints from a failed export, located
   assert.deepEqual(
     error(`error: expected expression\n  ┌─ ${join(BOOK, "template.typ")}:3:10\n\nerror: unclosed delimiter\n  ┌─ ${frag}:2:1\n`),
     { message: "expected expression (book/template.typ:3)\nunclosed delimiter", line: null },
+  );
+  // A broken template: located there, and at the fragment's import of it through the trace
+  // (the book main's import on line 1). The same error through two imports shows once.
+  const tpl = join(BOOK, "template.typ");
+  const importing = (col: number) =>
+    `error: unclosed delimiter\n    ┌─ ${tpl}:9:${col}\n    │\n9 │ #let VV = $bb(V\n    │           ^\n\n` +
+    `help: while importing \`/book/template.typ\`\n  ┌─ ${frag}:1:1\n  │\n1 │ #import "/book/template.typ": *\n  │  ^^^^\n\n`;
+  assert.deepEqual(error(importing(10) + importing(13)), { message: "unclosed delimiter (book/template.typ:9)", line: 1 });
+  // A template function the formula calls fails: the trace points at the formula's line.
+  assert.deepEqual(
+    error(
+      `error: cannot add string and integer\n    ┌─ ${tpl}:12:14\n    │\n12 │ #let bad(x) = x + 1\n    │               ^^^^^\n\n` +
+        `help: while calling \`bad\`\n  ┌─ ${frag}:6:94\n  │\n6 │ $bad("s")$\n  │ ^^^^^^^^\n\n`,
+    ),
+    { message: "cannot add string and integer (book/template.typ:12)", line: 6 },
   );
   assert.equal(typstExportError("ExportTask(0): document is not available for export: file not found", ROOT), null);
   assert.equal(typstExportError("workspace/executeCommand timed out after 5000ms", ROOT), null);

@@ -1,7 +1,7 @@
-import { ChangeSet, EditorState, Text } from "@codemirror/state";
+import { ChangeSet, EditorState, Extension, Text } from "@codemirror/state";
 import { EditorView, ViewUpdate } from "@codemirror/view";
 import { join } from "path";
-import { Scope, TextFileView, TFile, WorkspaceLeaf } from "obsidian";
+import { Notice, Scope, TextFileView, TFile, ViewStateResult, WorkspaceLeaf, setIcon } from "obsidian";
 import { pathToUri, uriToPath } from "../lsp/client";
 import type TinymistPlugin from "../main";
 import {
@@ -30,12 +30,20 @@ import {
   syncDarkTheme,
 } from "./shared/editorKit";
 import {
+  LIVE_MAX_LINES,
+  isLive,
+  livePreview,
+  livePreviewCompartment,
+  renderStats,
+} from "./shared/livePreview";
+import {
   LspDocument,
   tinymistBackend,
   typstEditorExtensions,
 } from "./typstEditor";
 import { typstMathAt } from "./typstFragment";
-import { typstRenderHover } from "./typstRender";
+import { typstLiveLanguage } from "./typstLive";
+import { TypstLiveRenderer, typstRenderHover } from "./typstRender";
 
 interface LspRangeLike {
   start: { line: number; character: number };
@@ -48,6 +56,16 @@ export interface LspTextEdit {
 }
 
 export const VIEW_TYPE_TYPST = "tinymist-typst";
+
+/** Source, or live preview (formulas render in place; typstLive.ts). */
+export type EditingMode = "source" | "live";
+
+/** The number of lines of `text`, counted up to `max + 1`. */
+function linesUpTo(text: string, max: number): number {
+  let n = 1;
+  for (let at = text.indexOf("\n"); at >= 0 && n <= max; at = text.indexOf("\n", at + 1)) n++;
+  return n;
+}
 
 export class TypstView extends TextFileView {
   private editor: EditorView | null = null;
@@ -66,6 +84,12 @@ export class TypstView extends TextFileView {
   private crlf = false;
   /** Ephemeral state that arrived before the editor existed. */
   private pendingEState: EditorEphemeralState | null = null;
+  /** Kept in the view state (getState/setState), as Markdown views keep theirs. */
+  private mode: EditingMode;
+  /** The header action that switches the mode. */
+  private modeAction: HTMLElement;
+  /** Live preview's renderer for the open file (its renders survive mode switches). */
+  private liveRenderer: TypstLiveRenderer | null = null;
 
   constructor(
     leaf: WorkspaceLeaf,
@@ -76,9 +100,12 @@ export class TypstView extends TextFileView {
     this.detachDiagListener = plugin.onDiagnostics((uri) =>
       this.applyDiagnostics(uri),
     );
+    this.mode = this.defaultMode();
+    this.modeAction = this.addAction("book-open", "Switch to live preview", () => this.toggleMode());
     this.addAction("eye", "Open preview", () => {
       void this.plugin.openPreview(this);
     });
+    this.syncModeUi();
     // Obsidian's global hotkeys consume these keys before CodeMirror sees them.
     // Mod-S (save) and Mod-F (showSearch below) keep their Obsidian meaning.
     this.scope = new Scope(this.app.scope);
@@ -111,6 +138,76 @@ export class TypstView extends TextFileView {
     return this.editor;
   }
 
+  get editingMode(): EditingMode {
+    return this.mode;
+  }
+
+  /** The view state with the editing mode: it survives a restart through workspace.json. */
+  getState(): Record<string, unknown> {
+    return { ...super.getState(), mode: this.mode };
+  }
+
+  /**
+   * A state's mode applies (a restored leaf, history navigation); a state without one (a
+   * file opened in this leaf) keeps the leaf's, as Markdown views do. A new view starts in
+   * the default mode.
+   */
+  async setState(state: unknown, result: ViewStateResult): Promise<void> {
+    const mode = (state as { mode?: unknown } | null)?.mode;
+    if (mode === "live" || mode === "source") this.mode = mode;
+    await super.setState(state, result);
+    this.applyMode(); // the same file (not reloaded), or a live mode the file refused
+  }
+
+  /**
+   * Switch between source and live preview: the header action and the command "Toggle live
+   * preview". Only the compartment changes, so the document, selection, undo history and
+   * scroll stay. Live preview is refused for files over LIVE_MAX_LINES lines (a Notice).
+   */
+  setMode(mode: EditingMode): boolean {
+    if (mode === "live") {
+      const typst = this.plugin.typstRender;
+      if (!typst) {
+        new Notice("Tinymist: live preview needs a vault on the local file system.");
+        return false;
+      }
+      const lines = this.editor?.state.doc.lines ?? 0;
+      if (lines > LIVE_MAX_LINES) {
+        new Notice(
+          `Tinymist: live preview is limited to ${LIVE_MAX_LINES.toLocaleString("en-US")} lines ` +
+            `(this file has ${lines.toLocaleString("en-US")}).`,
+        );
+        return false;
+      }
+      // Renders that failed for want of the renderer (binary, timeout) are tried again.
+      typst.retryFailed();
+    }
+    if (mode === this.mode) return true;
+    this.mode = mode;
+    this.applyMode();
+    this.app.workspace.requestSaveLayout();
+    return true;
+  }
+
+  toggleMode(): void {
+    this.setMode(this.mode === "live" ? "source" : "live");
+  }
+
+  private defaultMode(): EditingMode {
+    return this.plugin.settings.editingMode === "live" && this.plugin.typstRender ? "live" : "source";
+  }
+
+  /** "Show render statistics": the live renderer's numbers, or null in source mode. */
+  renderStatistics(): string | null {
+    if (!this.editor || !isLive(this.editor.state)) return null;
+    const s = renderStats(this.editor);
+    return (
+      `${s.renders} renders (p50 ${s.p50} ms, p95 ${s.p95} ms), ${s.pending} pending; ` +
+      `cache ${s.hits} hits, ${s.misses} misses; ` +
+      `${s.builds} decoration builds (p50 ${s.buildP50} ms, p95 ${s.buildP95} ms)`
+    );
+  }
+
   getViewData(): string {
     if (!this.editor) return this.data;
     const text = this.editor.state.doc.toString();
@@ -121,6 +218,8 @@ export class TypstView extends TextFileView {
     // CodeMirror joins lines with LF; keep a CRLF file CRLF (its first line break decides),
     // so opening and switching away never rewrites it.
     this.crlf = /^[^\n]*\r\n/.test(data);
+    // A file too long for live preview opens in source mode.
+    if (clear && this.mode === "live" && linesUpTo(data, LIVE_MAX_LINES) > LIVE_MAX_LINES) this.mode = "source";
     if (!this.editor) {
       this.contentEl.addClasses(["tym-editor-content", "lsp-cm-view"]);
       this.editor = new EditorView({
@@ -139,6 +238,7 @@ export class TypstView extends TextFileView {
       applyEphemeralState(this.editor, this.pendingEState);
       this.pendingEState = null;
     }
+    if (clear) this.syncModeUi();
     this.syncLspOpen();
     if (clear) this.plugin.syncPinnedMain();
   }
@@ -153,6 +253,10 @@ export class TypstView extends TextFileView {
   async onRename(file: TFile): Promise<void> {
     await super.onRename(file);
     this.syncLspOpen();
+    // Renders depend on the file's folder and book: start afresh under the new path.
+    if (this.editor && this.mode === "live") {
+      this.editor.dispatch({ effects: livePreviewCompartment.reconfigure(this.liveExtension()) });
+    }
   }
 
   clear(): void {
@@ -250,6 +354,7 @@ export class TypstView extends TextFileView {
                 typstMathAt(state.doc, pos) !== null,
             ),
           ],
+          live: this.liveExtension(),
           renderInfo: markdownInfoRenderer(
             this.plugin.app,
             () => this.file?.path ?? null,
@@ -273,6 +378,37 @@ export class TypstView extends TextFileView {
       (key && this.plugin.history.restore(key, data, { extensions })) ||
       EditorState.create({ doc: data, extensions })
     );
+  }
+
+  /**
+   * The content of livePreviewCompartment for the mode (also what HistoryCache.restore
+   * gets): live preview with this file's renderer, or nothing.
+   */
+  private liveExtension(): Extension {
+    const typst = this.plugin.typstRender;
+    const path = this.absolutePath();
+    if (this.mode !== "live" || !typst || !path) return [];
+    if (this.liveRenderer?.file !== path) {
+      this.liveRenderer = new TypstLiveRenderer(typst, path, () => this.contentEl.ownerDocument);
+    }
+    return livePreview({ language: typstLiveLanguage(), renderer: this.liveRenderer });
+  }
+
+  /** The editor's compartment and the header action as the mode says. */
+  private applyMode(): void {
+    const editor = this.editor;
+    if (editor && this.mode === "live" && editor.state.doc.lines > LIVE_MAX_LINES) this.mode = "source";
+    if (editor && isLive(editor.state) !== (this.mode === "live")) {
+      editor.dispatch({ effects: livePreviewCompartment.reconfigure(this.liveExtension()) });
+    }
+    this.syncModeUi();
+  }
+
+  private syncModeUi(): void {
+    const live = this.mode === "live";
+    setIcon(this.modeAction, live ? "code" : "book-open");
+    this.modeAction.setAttribute("aria-label", live ? "Switch to source mode" : "Switch to live preview");
+    this.contentEl.classList.toggle("is-live-preview", live);
   }
 
   /** A committed edit (never mid-composition): sync the server, save, re-highlight. */

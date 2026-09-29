@@ -5,14 +5,15 @@
 // real renderer process is covered by tests/fragmentRenderer.test.ts.
 import "./support/dom";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { EditorState, Extension, Text } from "@codemirror/state";
 import { EditorView, closeHoverTooltips, hoverTooltip } from "@codemirror/view";
 import { typstEditorExtensions } from "../src/editor/typstEditor";
 import { typstMathAt } from "../src/editor/typstFragment";
-import { FragmentBackend, TypstRender, typstRenderHover } from "../src/editor/typstRender";
+import { FileEvent, FragmentBackend, TypstRender, typstRenderHover } from "../src/editor/typstRender";
 import { FragmentError } from "../src/lsp/fragmentRenderer";
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -167,7 +168,7 @@ test("render hover: Typst's error with the formula, and nothing while the settin
   }
 });
 
-test("TypstRender cache: one render per formula and preamble; another file's change drops it", async () => {
+test("TypstRender cache: one render per formula and preamble; a change of a file it reads drops it", async () => {
   let broken = false;
   const { backend, calls } = fakeBackend((s) =>
     s.includes("frac(1, $") ? new FragmentError("unclosed delimiter") : broken ? new Error("timed out") : null,
@@ -187,22 +188,28 @@ test("TypstRender cache: one render per formula and preamble; another file's cha
     assert.equal(calls.length, 2, "the chapter part is in the key");
 
     // Saving the chapter itself keeps its renders and its epoch (an autosave at every
-    // typing pause); other files' renders are dropped. A template change drops them all.
+    // typing pause), and those of its sibling, which does not read it. A template change
+    // drops them all.
     const CH2 = join(ROOT, "book", "chapters", "ch2.typ");
+    const ch2 = Text.of(readFileSync(CH2, "utf8").split("\n"));
+    const inCh2 = () => render.math(CH2, ch2, at(ch2, "norm(x)$"));
+    await inCh2();
+    calls.pop(); // counted apart
     const [epoch1, epoch2] = [render.epoch(CH1), render.epoch(CH2)];
-    render.fileChanged(CH1);
+    render.fileChanged(CH1, "modify");
     await sleep(350);
     await math("EE[X] = integral");
+    await inCh2();
     assert.equal(calls.length, 2);
-    assert.deepEqual([render.epoch(CH1), render.epoch(CH2)], [epoch1, epoch2 + 1]);
-    render.fileChanged(join(ROOT, "book", "template.typ"));
+    assert.deepEqual([render.epoch(CH1), render.epoch(CH2)], [epoch1, epoch2]);
+    render.fileChanged(join(ROOT, "book", "template.typ"), "modify");
     await sleep(350);
-    assert.deepEqual([render.epoch(CH1), render.epoch(CH2)], [epoch1 + 1, epoch2 + 2]);
+    assert.deepEqual([render.epoch(CH1), render.epoch(CH2)], [epoch1 + 1, epoch2 + 1]);
     await math("EE[X] = integral");
     assert.equal(calls.length, 3);
     // Two files in one batch: the chapter's own renders go too.
-    render.fileChanged(CH1);
-    render.fileChanged(join(ROOT, "book", "template.typ"));
+    render.fileChanged(CH1, "modify");
+    render.fileChanged(join(ROOT, "book", "template.typ"), "modify");
     await sleep(350);
     assert.equal(render.epoch(CH1), epoch1 + 2);
     await math("EE[X] = integral");
@@ -216,7 +223,7 @@ test("TypstRender cache: one render per formula and preamble; another file's cha
     assert.equal(calls.length, 4);
     broken = true;
     const other = Text.of([CH1_TEXT, "$y + z$"].join("\n").split("\n"));
-    assert.deepEqual(await math("y + z", other), { ok: false, message: "timed out" });
+    assert.deepEqual(await math("y + z", other), { ok: false, message: "timed out", transient: true });
     broken = false;
     assert.ok((await math("y + z", other)).ok);
     assert.equal(calls.length, 6);
@@ -235,7 +242,7 @@ test("TypstRender cache: one render per formula and preamble; another file's cha
     let slowCalls = 0;
     const slow = new TypstRender({ render: async (_d, s) => (slowCalls++, await sleep(delay), page(s)) }, ROOT);
     const pending = slow.math(CH1, doc, at(doc, "EE[X] = integral"));
-    slow.fileChanged(join(ROOT, "book", "template.typ"));
+    slow.fileChanged(join(ROOT, "book", "template.typ"), "modify");
     await pending;
     delay = 0;
     await slow.math(CH1, doc, at(doc, "EE[X] = integral"));
@@ -259,11 +266,13 @@ test("TypstRender: renders are dropped 300 ms after the last .typ change, not th
   const render = new TypstRender({ render: async (_d, s) => page(s) }, ROOT);
   const TEMPLATE = join(ROOT, "book", "template.typ");
   try {
+    const doc = Text.of(CH1_TEXT.split("\n"));
+    await render.math(CH1, doc, typstMathAt(doc, CH1_TEXT.indexOf("EE[X] = integral"))!);
     const epoch = render.epoch(CH1);
-    render.fileChanged(join(ROOT, "book", "chapters", "ch2.typ"));
+    render.fileChanged(join(ROOT, "book", "chapters", "ch2.typ"), "create");
     await sleep(250);
     // A template write late in the window: tinymist may not have seen it at 300 ms.
-    render.fileChanged(TEMPLATE);
+    render.fileChanged(TEMPLATE, "modify");
     await sleep(100);
     assert.equal(render.epoch(CH1), epoch, "a later change postpones the drop");
     await sleep(250);
@@ -367,5 +376,165 @@ test("TypstRender: an error in a preamble statement is located there, not blamed
   } finally {
     view.destroy();
     hovered.dispose();
+  }
+});
+
+/** A vault with a book: main imports the template, which imports alias.typ; two chapters and a loose note. */
+function tempBook() {
+  const root = mkdtempSync(join(tmpdir(), "tinymist-deps-"));
+  const book = join(root, "book");
+  mkdirSync(join(book, "chapters"), { recursive: true });
+  mkdirSync(join(book, "notes"));
+  const write = (rel: string, text: string) => writeFileSync(join(book, rel), text);
+  write("main.typ", '#import "template.typ": *\n#include "chapters/ch1.typ"\n#include "chapters/ch2.typ"\n');
+  write("template.typ", '#import "alias.typ": *\n#let EE = $bb(E)$\n');
+  write("alias.typ", "#let RR = $bb(R)$\n");
+  write("chapters/ch1.typ", "$x$\n");
+  write("chapters/ch2.typ", "$y$\n");
+  write("notes/loose.typ", "$z$\n");
+  write("notes/other.typ", "#let w = 1\n");
+  const path = (rel: string) => join(book, rel);
+  return { root, path, close: () => rmSync(root, { recursive: true, force: true }) };
+}
+
+test("TypstRender: a modified file drops the renders of the files whose preambles read it, through imports", async () => {
+  const book = tempBook();
+  const { backend, calls } = fakeBackend();
+  const render = new TypstRender(backend, book.root);
+  const [ch1, ch2, loose] = ["chapters/ch1.typ", "chapters/ch2.typ", "notes/loose.typ"].map(book.path);
+  let ch2Text = Text.of(["$y$"]);
+  const texts = new Map([
+    [ch1, Text.of(['#import "../template.typ": *', "$x$"])],
+    [loose, Text.of(['#import "other.typ": w', "$z$"])],
+  ]);
+  const renderAll = async () => {
+    for (const file of [ch1, ch2, loose]) {
+      const doc = file === ch2 ? ch2Text : texts.get(file)!;
+      await render.math(file, doc, typstMathAt(doc, doc.toString().lastIndexOf("$") - 1)!);
+    }
+  };
+  const epochs = () => [ch1, ch2, loose].map((f) => render.epoch(f));
+  /** The epochs a batch bumped, and how many formulas rendered again. */
+  const change = async (...changes: [string, FileEvent][]) => {
+    const before = epochs();
+    for (const [rel, event] of changes) render.fileChanged(book.path(rel), event);
+    await sleep(350);
+    const n = calls.length;
+    await renderAll();
+    return { bumped: epochs().map((e, i) => e - before[i]), rendered: calls.length - n };
+  };
+  try {
+    await renderAll();
+    assert.equal(calls.length, 3);
+    // A chapter's autosave: nobody reads it.
+    assert.deepEqual(await change(["chapters/ch1.typ", "modify"]), { bumped: [0, 0, 0], rendered: 0 });
+    // The template and the file it imports: both chapters (the book main imports the template),
+    // not the loose note, which main does not include.
+    assert.deepEqual(await change(["template.typ", "modify"]), { bumped: [1, 1, 0], rendered: 2 });
+    assert.deepEqual(await change(["alias.typ", "modify"]), { bumped: [1, 1, 0], rendered: 2 });
+    // The note's own import.
+    assert.deepEqual(await change(["notes/other.typ", "modify"]), { bumped: [0, 0, 1], rendered: 1 });
+    // The book main: it may start including any file below it.
+    assert.deepEqual(await change(["main.typ", "modify"]), { bumped: [1, 1, 1], rendered: 3 });
+    // A chapter that imports its sibling reads it.
+    ch2Text = Text.of(['#import "ch1.typ": x', "$y$"]);
+    await renderAll();
+    assert.deepEqual(await change(["chapters/ch1.typ", "modify"]), { bumped: [0, 1, 0], rendered: 1 });
+    // A template that starts importing another file: its own change counts, then the new one.
+    writeFileSync(book.path("template.typ"), '#import "alias.typ": *\n#import "more.typ": *\n');
+    assert.deepEqual(await change(["template.typ", "modify"]), { bumped: [1, 1, 0], rendered: 2 });
+    assert.deepEqual(await change(["more.typ", "create"]), { bumped: [1, 1, 1], rendered: 3 });
+    assert.deepEqual(await change(["more.typ", "modify"]), { bumped: [1, 1, 0], rendered: 2 });
+    // A file created, deleted or renamed: every other file's renders go.
+    assert.deepEqual(await change(["notes/new.typ", "create"]), { bumped: [1, 1, 1], rendered: 3 });
+    assert.deepEqual(await change(["chapters/ch1.typ", "delete"]), { bumped: [0, 1, 1], rendered: 2 });
+    assert.deepEqual(await change(["notes", "rename"]), { bumped: [1, 1, 1], rendered: 3 });
+  } finally {
+    render.dispose();
+    book.close();
+  }
+});
+
+test("TypstRender: a failure of the renderer itself is tried again once, when the renderer next answers", async () => {
+  // A cold start past the render timeout fails the first render; the start goes on.
+  let cold = true;
+  const { backend, calls } = fakeBackend((s) => {
+    if (s.endsWith("$slow$\n")) return new Error("rendering took longer than 5 s");
+    if (!cold) return null;
+    cold = false;
+    return new Error("rendering took longer than 5 s");
+  });
+  const render = new TypstRender(backend, ROOT);
+  const NOTE = join(ROOT, "book", "notes", "scratch.typ");
+  const doc = Text.of(["$a$ $b$ $c$ $slow$ $d$ $e$"]);
+  const math = (file: string, body: string) => render.math(file, doc, typstMathAt(doc, doc.toString().indexOf(body))!);
+  let notified = 0;
+  render.onChange(() => notified++);
+  try {
+    assert.deepEqual(await math(CH1, "$a$"), { ok: false, message: "rendering took longer than 5 s", transient: true });
+    const [e1, e2] = [render.epoch(CH1), render.epoch(NOTE)];
+    // The renderer answers another render: the failed file gets a new epoch (live views
+    // render it again), other files keep theirs.
+    assert.ok((await math(CH1, "$b$")).ok);
+    assert.deepEqual([render.epoch(CH1), render.epoch(NOTE), notified], [e1 + 1, e2, 1]);
+    assert.ok((await math(CH1, "$a$")).ok);
+    assert.ok((await math(CH1, "$c$")).ok);
+    assert.equal(notified, 1, "nothing left to retry");
+    // A formula whose own compile passes the timeout is tried again once, not on every answer.
+    assert.equal((await math(NOTE, "$slow$")).ok, false);
+    assert.ok((await math(NOTE, "$d$")).ok);
+    assert.deepEqual([render.epoch(NOTE), notified], [e2 + 1, 2]);
+    assert.equal((await math(NOTE, "$slow$")).ok, false);
+    assert.ok((await math(NOTE, "$e$")).ok);
+    assert.deepEqual([render.epoch(NOTE), notified], [e2 + 1, 2]);
+    // A settings save retries it, and only the files with failures.
+    render.retryFailed();
+    assert.deepEqual([render.epoch(CH1), render.epoch(NOTE), notified], [e1 + 1, e2 + 2, 3]);
+    render.retryFailed();
+    assert.equal(notified, 3, "nothing failed since");
+    assert.equal(calls.filter((c) => c.source.endsWith("$slow$\n")).length, 2);
+  } finally {
+    render.dispose();
+  }
+});
+
+test("TypstRender: an error in a template the preamble imports is located at the import, with the last rendering", async () => {
+  // As Typst reports a broken template: at its own line, then "while importing" at the
+  // fragment's line 1 (the book main's import), which typstExportError gives as the line.
+  let broken = false;
+  const backend: FragmentBackend = {
+    async render(_dir, source) {
+      if (broken) throw new FragmentError("unclosed delimiter (book/template.typ:9)", 1);
+      return page(source);
+    },
+  };
+  const render = new TypstRender(backend, ROOT);
+  const doc = Text.of(CH1_TEXT.split("\n"));
+  const at = (needle: string) => typstMathAt(doc, CH1_TEXT.indexOf(needle))!;
+  try {
+    const good = await render.math(CH1, doc, at("EE[X] = integral"));
+    assert.ok(good.ok);
+    broken = true;
+    render.fileChanged(join(ROOT, "book", "template.typ"), "modify");
+    await sleep(350);
+    const r = await render.math(CH1, doc, at("EE[X] = integral"));
+    assert.equal(r.ok, false);
+    assert.deepEqual(
+      { ...r, last: r.ok ? null : r.last === good },
+      {
+        ok: false,
+        message: "unclosed delimiter (book/template.typ:9)",
+        at: 'book/main.typ:2: #import "/book/template.typ": *',
+        last: true,
+      },
+    );
+    // A formula never rendered before has no last rendering.
+    assert.equal(((await render.math(CH1, doc, at("X: Omega"))) as { last?: unknown }).last, undefined);
+    // A statement of the file's own changes the formula: no last rendering either.
+    const edited = Text.of(["#let extra = 1", ...CH1_TEXT.split("\n")]);
+    const own = await render.math(CH1, edited, typstMathAt(edited, edited.toString().indexOf("EE[X] = integral"))!);
+    assert.equal((own as { last?: unknown }).last, undefined);
+  } finally {
+    render.dispose();
   }
 });

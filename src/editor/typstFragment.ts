@@ -43,7 +43,9 @@ export interface TopLevelStatement {
 const STATEMENT = /#(import|include|let|set|show)(?![\w-])/y;
 const IDENT = /[A-Za-z_][\w-]*/y;
 /** Keywords whose embedded expression runs to the end of the line (bodies included). */
-const LINE_KEYWORDS = new Set(["let", "set", "show", "import", "include", "if", "for", "while", "context", "return"]);
+export const LINE_KEYWORDS: ReadonlySet<string> = new Set([
+  "let", "set", "show", "import", "include", "if", "for", "while", "context", "return",
+]);
 
 const lineEnd = (s: string, i: number) => {
   const at = s.indexOf("\n", i);
@@ -63,7 +65,7 @@ function blockCommentEnd(s: string, i: number): number {
 }
 
 /** After a comment or raw text starting at `i`, or -1 when none starts there. */
-function skipTrivia(s: string, i: number): number {
+export function skipTrivia(s: string, i: number): number {
   const c = s[i];
   if (c === "/" && s[i + 1] === "/" && s[i - 1] !== ":") return lineEnd(s, i);
   if (c === "/" && s[i + 1] === "*") return blockCommentEnd(s, i);
@@ -91,7 +93,7 @@ function skipString(s: string, i: number): number {
  * closed. Code groups skip strings and comments; content and math skip escapes and
  * embedded `#` expressions; any of them nests the others.
  */
-function skipGroup(s: string, i: number): number {
+export function skipGroup(s: string, i: number): number {
   const stack = [s[i]];
   i++;
   while (i < s.length) {
@@ -159,7 +161,7 @@ function codeLineEnd(s: string, i: number, inMath = false): number {
  * After the embedded expression right after a `#` at `i - 1` (`#f(x)[y].z`,
  * `#(a, b).map(f)`, `#if …`); `inMath` when that `#` is in math.
  */
-function skipEmbedded(s: string, i: number, inMath = false): number {
+export function skipEmbedded(s: string, i: number, inMath = false): number {
   const c = s[i];
   let j: number;
   if (c === "(" || c === "[" || c === "{") {
@@ -189,6 +191,9 @@ function skipEmbedded(s: string, i: number, inMath = false): number {
   }
 }
 
+/** Characters that start an escape, a comment, raw text, math or code in markup. */
+const TOP_LEVEL_SPECIAL = /[\\/`$#]/g;
+
 /**
  * The `#import/#include/#let/#set/#show` statements at the top level of a Typst markup
  * file, in order. A statement runs to the end of its line with every bracket balanced,
@@ -200,6 +205,11 @@ export function topLevelStatements(text: string, code?: { from: number; to: numb
   const out: TopLevelStatement[] = [];
   let i = 0;
   while (i < text.length) {
+    // Straight to the next character that may start something (plain text is most of it).
+    TOP_LEVEL_SPECIAL.lastIndex = i;
+    const next = TOP_LEVEL_SPECIAL.exec(text);
+    if (!next) break;
+    i = next.index;
     const c = text[i];
     const t = skipTrivia(text, i);
     if (c === "\\") {
@@ -210,13 +220,10 @@ export function topLevelStatements(text: string, code?: { from: number; to: numb
       const end = skipGroup(text, i);
       i = end < 0 ? i + 1 : end;
     } else if (c === "#") {
-      STATEMENT.lastIndex = i;
-      const m = STATEMENT.exec(text);
-      if (m) {
-        const end = codeLineEnd(text, i + m[0].length);
-        const stmt = text.slice(i, end).trimEnd();
-        out.push({ kind: m[1] as TopLevelStatement["kind"], text: stmt, from: i, to: i + stmt.length });
-        i = Math.max(end, i + 1);
+      const stmt = statementAt(text, i);
+      if (stmt) {
+        out.push(stmt.statement);
+        i = stmt.next;
       } else {
         const end = Math.max(skipEmbedded(text, i + 1), i + 1);
         code?.push({ from: i, to: end });
@@ -227,6 +234,22 @@ export function topLevelStatements(text: string, code?: { from: number; to: numb
     }
   }
   return out;
+}
+
+/**
+ * The statement whose `#` is at `i` when it is `#import/#include/#let/#set/#show` (as
+ * topLevelStatements takes it at the top level), with where scanning goes on after it.
+ */
+export function statementAt(text: string, i: number): { statement: TopLevelStatement; next: number } | null {
+  STATEMENT.lastIndex = i;
+  const m = STATEMENT.exec(text);
+  if (!m) return null;
+  const end = codeLineEnd(text, i + m[0].length);
+  const stmt = text.slice(i, end).trimEnd();
+  return {
+    statement: { kind: m[1] as TopLevelStatement["kind"], text: stmt, from: i, to: i + stmt.length },
+    next: Math.max(end, i + 1),
+  };
 }
 
 interface TopLevel {
@@ -255,6 +278,9 @@ export function documentStatements(doc: Text): readonly TopLevelStatement[] {
 
 /** A bare `#show: f` applies a document template (cover, outline, page setup): dropped. */
 const templateRule = (s: TopLevelStatement) => s.kind === "show" && /^#show\s*:/.test(s.text);
+
+/** A statement of the file that joins the preambles of its fragments below it (chapterStatements). */
+export const inChapterPreamble = (s: TopLevelStatement): boolean => s.kind !== "include" && !templateRule(s);
 
 const insideRoot = (rel: string) => !!rel && rel !== ".." && !rel.startsWith(".." + sep) && !isAbsolute(rel);
 
@@ -347,6 +373,22 @@ export function projectStatements(filePath: string, root: string): PreambleState
   return out;
 }
 
+/** A quoted path of a .typ file (`#import "x.typ"`, `read("y.typ")`), not a package's. */
+const TYP_PATH = /"([^"@\n][^"\n]*\.typ)"/g;
+
+/**
+ * The .typ files `text`, written in folder `dir`, names in quotes, as absolute paths
+ * (`/…` from the vault root): imports and file reads, and any other such string.
+ */
+export function typFilesNamed(text: string, dir: string, root: string): string[] {
+  return [...text.matchAll(TYP_PATH)].map(([, path]) => (path.startsWith("/") ? join(root, path) : resolve(dir, path)));
+}
+
+/** typFilesNamed of the file at `path` (none when it cannot be read). */
+export function typFilesNamedIn(path: string, root: string): string[] {
+  return typFilesNamed(readText(path), dirname(path), root);
+}
+
 /** projectStatements as preamble text. */
 export function projectPreamble(filePath: string, root: string): string {
   return projectStatements(filePath, root)
@@ -359,7 +401,7 @@ export function chapterStatements(statements: readonly TopLevelStatement[], offs
   const out: TopLevelStatement[] = [];
   for (const s of statements) {
     if (s.to > offset) break;
-    if (s.kind !== "include" && !templateRule(s)) out.push(s);
+    if (inChapterPreamble(s)) out.push(s);
   }
   return out;
 }
@@ -369,6 +411,20 @@ export function chapterPreamble(statements: readonly TopLevelStatement[], offset
   return chapterStatements(statements, offset)
     .map((s) => s.text)
     .join("\n");
+}
+
+/** cyrb53: a fast 53-bit string hash, in base 36. */
+export function hash(s: string): string {
+  let h1 = 0xdeadbeef;
+  let h2 = 0x41c6ce57;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    h1 = Math.imul(h1 ^ c, 2654435761);
+    h2 = Math.imul(h2 ^ c, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(36);
 }
 
 /** The preamble of a fragment at `offset` in `filePath`, whose buffer is `text`. */

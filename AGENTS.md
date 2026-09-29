@@ -15,6 +15,8 @@
   props and `syntaxHighlighting` never decorate custom views. All highlighting
   (the baseline tokenizer in `src/editor/highlightPlugin.ts`, LSP semantic
   tokens in `src/editor/semanticTokens.ts`) goes through direct decorations.
+  The baseline tokenizer skips escapes in markup and math (`\$5` opens no
+  math).
 - The LSP client is hand-rolled and minimal on purpose. Unknown server
   requests get a `null` response and a debug log; extend explicitly when a
   feature needs it. Edits reach the server incrementally through
@@ -62,6 +64,69 @@
   long display scrolled past its first line would hide tinymist's section too
   (`tests/renderHover.test.ts` checks the anchor). A render still pending when
   the pointer leaves the editor shows nothing.
+- Live preview (`src/editor/shared/livePreview.ts`; its test
+  `tests/livePreview.test.ts` is identical in both repositories): one StateField
+  holds every decoration (block widgets and replaced line breaks throw from a
+  ViewPlugin). `liveInput()` is mounted always and OUTSIDE
+  `livePreviewCompartment` (a field added by a reconfiguration never sees that
+  transaction's effects); `livePreview({ language, renderer })` goes inside it,
+  so a mode toggle is one reconfigure, and `HistoryCache.restore` gets the
+  compartment content for the view's mode. It binds no keys: keyArbiter stays
+  first and the only owner of Tab, Shift-Tab, Enter, Escape and the arrows;
+  vertical motion into block widgets goes only through the `enterBlocks`
+  transaction filter, and the golden key matrix passes unchanged with live
+  preview on. The filter corrects only line moves: userEvent exactly "select", a
+  goal column on the range (cursorLineUp/Down, their Shift forms, PageUp/Down)
+  and as many ranges as before, so Select All, Mod-Home/End, Cmd-ArrowUp/Down,
+  snippet fields and Escape's simplifySelection are never redirected; a line
+  move into a block at the document's end or start stops on its first or last
+  line. jsdom's vertical motion returns no goal column: tests that press arrows
+  into blocks patch `EditorView.prototype.moveVertically` to add one. A
+  construct shows its source while the editor has focus, or its search panel is
+  open (findNext and replace keep the focus in the panel; the current match must
+  show), and a selection touches it (inclusively), so completion popups, snippet
+  fields and YOLO ghost text always sit in visible source. A language's
+  `decorate` keeps a construct's decorations within its own lines (a selection
+  move re-decorates only the constructs on the lines it left or entered; the
+  test compares that with a full build) and draws rendered constructs through
+  `renderConstruct`. A construct with an error diagnostic in it (overlapping it,
+  or empty and inside or at its edge; one that only ends where it starts does
+  not count) stays source: diagnostics still reach the editor only through
+  `setTypingDiagnostics`, the field rebuilds on lint's `setDiagnosticsEffect`,
+  and the live layer never dispatches `setDiagnostics`. While the mouse is down
+  and during `input.type.compose` the decorations are only mapped
+  (`compositionend` refreshes); renders that land are shown through
+  `refreshLive` carrying their keys, which re-decorates only the constructs
+  waiting for them (`refreshLive.of(null)` rebuilds everything), never
+  mid-composition, and the scheduler never waits on visible renders that are
+  cached but held by the mouse or a composition (it would spin through
+  microtasks and starve the mouseup). The view draws the replacements within one
+  line only near the viewport (4,000 characters on each side, and the main
+  selection's lines), through a function in `EditorView.decorations`: CodeMirror
+  compares every replaced range of a set on each update. Block replacements and
+  replacements over line breaks stay in the field's static sets; atomic ranges,
+  `replacedAt` and `enterBlocks` read the whole sets, and tests comparing
+  decorations include the function's output. A scanner that throws leaves that
+  text as source (logged once). A `FragmentRenderer` keys its results on its
+  `epoch` and calls `subscribe`'s listener when that changes; a construct still
+  rendering stays source (no placeholders). A pending or failed `RenderWidget`
+  keeps what its element shows only when that was its own construct's (the same
+  request, or the preview below the block being edited): CodeMirror hands any
+  dropped widget's DOM to `updateDOM`, with the old widget. Block widgets, the
+  preview below a revealed block and BlockWrapper boxes get no vertical margins
+  (CodeMirror's height map and vertical motion miss them); their late size
+  changes are remeasured through a line attribute. The render hover never shows
+  over a live widget (`renderHover` checks `replacedAt` itself). Search: other
+  matches inside rendered widgets stay hidden (accepted). External changes
+  (`setDocText`) are ordinary edits that rebuild the field; each pane has its
+  own mode. After changing `livePreview.ts` or its styles, also run
+  `node scripts/browser-smoke.mjs` (headless Chrome, skipped without it: B1
+  arrows through blocks, including blocks at the document's edges, and the jumps
+  that must not be redirected; B2 IME; B3 drag; B4 gutter drift; B5 performance
+  on `scripts/gen-perf-fixture.mjs`'s 5,700-line chapter, typing in a revealed
+  block until its preview re-rendered, and the page staying responsive with the
+  mouse held during the prefetch). Both scripts are identical in the two
+  repositories.
 - Typst formula renders (`typstRenderHover`, above `lspHoverTooltip`, setting
   `hoverRender`) come from a second `tinymist lsp` owned by the plugin
   (`TypstFragmentRenderer`, `src/lsp/fragmentRenderer.ts`), never from the
@@ -97,16 +162,105 @@
   `context`, shows no hover section (`needsEnclosingCode`): the document
   compiles, the fragment cannot. An error Typst locates on a preamble line
   shows that line (`book/main.typ:4: #set …`, located at every render, not
-  cached) in place of the formula. SVGs: the sentinel ink becomes
-  `currentColor`, the marker gives the baseline, ids are prefixed per render,
-  and sizes are in em (1em = 16pt). `TypstRender` caches by folder, preamble
-  hash, mode and formula. `.typ` changes, 300 ms after the last one (well past
-  the renderer's file watcher), drop the renders of every other file and bump
-  those files' `epoch(file)`; a file's own saves (an autosave at every typing
-  pause) keep its renders and its epoch, since its statements are keyed through
-  the buffer. Live mode keys a view's renders on `epoch(viewFile)`. Obsidian
-  sends no events for dotfiles, so `.tinymist-fragment.typ` is re-read on
-  every render (its text is in the key).
+  cached) in place of the formula. An error inside an imported file (a
+  template saved half-typed) is the preamble line importing it:
+  `typstExportError` takes the first error's first row in the fragment
+  document, its own or its trace's ("help: while importing"; "while calling" a
+  template function points at the formula, which keeps the error), and shows a
+  repeated line once. SVGs: the sentinel ink becomes `currentColor`, the
+  marker gives the baseline, ids are prefixed per render, and sizes are in em
+  (1em = 16pt). `TypstRender` caches by folder, preamble hash, mode and
+  formula. At each render it records the `.typ` files the
+  file's preambles read (`dependencies`): every `main.typ` from its folder up
+  (bookMain may pick any), the files its project statements come from, and the
+  quoted `.typ` paths those statements and the buffer's preamble statements
+  name, followed through the whole text of each file named; never the book
+  main's includes, a chapter's own `#include`s or the file itself. A vault
+  modify (`fileChanged(path, event)`), 300 ms after the last change (well past
+  the renderer's file watcher), drops the renders of the files that read it and
+  bumps their `epoch(file)`; a create, delete or rename (a folder too) drops
+  those of every other file. So a chapter's autosave at every typing pause
+  keeps its own renders (its statements are keyed through the buffer) and those
+  of the other open chapters (they never read it), while a template, alias
+  file or book main edit renders every file reading it again (design §5.5).
+  Live mode keys a view's renders on `epoch(viewFile)`. Obsidian sends no
+  events for dotfiles, so `.tinymist-fragment.typ` is re-read on every render
+  (its text is in the key); live widgets pick up its edits only at the next
+  epoch or when the file is reopened.
+- Typst live preview (`src/editor/typstScan.ts`, `src/editor/typstLive.ts`,
+  `TypstLiveRenderer` in `typstRender.ts`; tests in
+  `tests/typstLivePreview.test.ts`, the mode in `tests/typstView.test.ts`)
+  renders formulas in markup only. Dollars pair by typstMathSpans' rule
+  (`mathClose`); statements, keyword expressions (`#if`, `#for`, `#context`,
+  …), call arguments and code blocks are never looked into, while the content
+  blocks a call carries (`#theorem[…]`, `#[…]`) are scanned. A display formula
+  takes its trailing `<label>` into its range and is a block when alone on its
+  lines. A formula's key is `ctx.request`'s plus the hash of the file's
+  statements above it (collected in the scan exactly as `topLevelStatements`
+  takes them; a test compares): without that part a `#let` edit would keep
+  stale renders. While a new render is pending, or failed on a preamble line
+  (`PreambleFailure`), a formula keeps its last rendering (no flash of source
+  while a statement above is typed): its own, found by its source and `nth`
+  (which occurrence of that source it is: the same source under other
+  statements renders differently), remembered per view (`typstLiveLanguage()`
+  makes one language per view; past max(2000, twice the document's formulas)
+  the occurrences gone from the text are dropped, never the document's). A new
+  epoch empties the view's cache, so a failure on a preamble line carries
+  `last` instead: `TypstRender`'s last rendering of the formula under the same
+  statements of its own file (book main and templates aside), which
+  `TypstLiveRenderer` draws; a template or book main saved half-typed keeps
+  every rendering, and only a formula never rendered shows the failure. Its
+  own Typst errors keep the source with the dotted underline;
+  `needsEnclosingCode` failures and failures of the renderer itself
+  (`transient`: no binary, a timeout) keep it quietly. Those are tried again
+  once each, automatically, when the renderer next answers a render (a slow
+  start, a restart; one that fails again waits), and all of them by
+  `TypstRender.retryFailed` (settings save, switching a view to live); a retry
+  bumps only the epochs of the files with failures. Until a new epoch's renders
+  land, a view's formulas show their source (the shared core drops the old
+  epoch's cache). Each view has one `TypstLiveRenderer` per file
+  (`subscribe` through `TypstRender.onChange`, only when the file's epoch
+  changed; a rename builds a new one). The mode lives in the view state
+  (`getState().mode`); `setState` applies a state's mode and keeps the leaf's
+  when there is none (as Markdown views); new views take the setting
+  `editingMode` (default source). The header action (book-open/code) and the
+  command "Toggle live preview" (no hotkey; Mod-E stays the preview toggle) go
+  through `TypstView.setMode`, which only reconfigures `livePreviewCompartment`
+  and refuses files over `LIVE_MAX_LINES` with a Notice (such files open in
+  source). `typstEditorExtensions` mounts `liveInput()` and the compartment
+  (`host.live`) after `semanticTokensExtension`, so `stateFor`, and with it
+  `HistoryCache.restore`, carries the mode's content. "Show render statistics"
+  shows `renderStats` in a Notice.
+- Typst text constructs in live mode (the same scanner and language; T-T6 in
+  `tests/typstLivePreview.test.ts`) follow Typst's own lexer and parser, not
+  Markdown's: check a new rule against
+  `typst compile --features html --format html` (and `typst query` for list
+  depth) before encoding it. Headings (`=` run, then whitespace, first on a
+  line or in a content block: `#block[= Title]`) take a line class
+  `lsp-lp-h1…h6` and hide their marker unless the cursor is on the line.
+  `*strong*`/`_emph_` close on their line; a delimiter between two letters or
+  digits of a non-CJK script is text (`2*3`, `snake_case`, `*a*b` closes
+  later). `- `, `+ ` and `/ term:` are items first on a line or first in
+  a content block. An item's body holds the lines below it indented deeper than
+  its marker (blank lines too); a run is the items of one kind that are
+  siblings, in one body or at the top, whatever their indentation (`  + a` then
+  `+ b` is one enum). Blank, comment and `#let/#set/#show/#import` lines keep
+  it; other content outside the last item's body ends it. `+` numbers count
+  through the run (an explicit `3.` sets them), bullets go •, ‣, – by the
+  number of enclosing lists (enums do not count). A marker shows only while
+  the marker itself is touched (a term: `/ Term:`), so it stays while the item
+  is typed. `@key` becomes a chip (`Supplement @key` with a `[supplement]` of
+  plain markup on the same line: no numbers; the supplement without its
+  strong/emph delimiters, `@key` alone when it holds raw text, a reference or
+  a label), `<key>` a faint chip (chips keep the editor's text size and weight
+  on a heading line); nothing inside an `http(s)://` link is markup. A
+  construct holding an error diagnostic keeps all its markup visible. The scan
+  treats `$`, `#`, escapes, comments and raw text exactly as for formulas, so
+  math pairing and the preamble hash do not move (the hash test includes text
+  constructs; a supplement holding code or math is left to the markup scan for
+  that reason). The test also compares every
+  selection move's decorations with a full build and checks Tab, Shift-Tab,
+  Enter, Escape and Backspace at every position against source mode.
 - `src/editor/typstEditor.ts` builds the editor's extension list without
   runtime Obsidian imports so tests mount the real stack; Obsidian-only
   parts (hover, Markdown info, the YOLO bridge instance) come in through the

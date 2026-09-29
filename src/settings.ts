@@ -14,6 +14,8 @@ export interface TinymistSettings {
   pinBookMain: boolean;
   /** Render the formula under the pointer above tinymist's hover. */
   hoverRender: boolean;
+  /** The mode newly opened Typst files start in (each tab then keeps its own). */
+  editingMode: "source" | "live";
 }
 
 export const DEFAULT_SETTINGS: TinymistSettings = {
@@ -23,6 +25,7 @@ export const DEFAULT_SETTINGS: TinymistSettings = {
   yoloTabCompletion: false,
   pinBookMain: true,
   hoverRender: true,
+  editingMode: "source",
 };
 
 export class TinymistSettingTab extends PluginSettingTab {
@@ -140,6 +143,25 @@ export class TinymistSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.hoverRender)
           .onChange(async (value) => {
             this.plugin.settings.hoverRender = value;
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName("Default editing mode")
+      .setDesc(
+        "The mode newly opened Typst files start in. In live preview, formulas render in " +
+          "place (by the same renderer as the hover) and show their source while the cursor " +
+          "is on them; a formula that fails keeps its source. Each tab keeps its own mode: " +
+          "switch it with the header button or the command \"Toggle live preview\". Files " +
+          "over 10,000 lines stay in source mode.",
+      )
+      .addDropdown((dd) =>
+        dd
+          .addOptions({ source: "Source", live: "Live preview" })
+          .setValue(this.plugin.settings.editingMode)
+          .onChange(async (value) => {
+            this.plugin.settings.editingMode = value === "live" ? "live" : "source";
             await this.plugin.saveSettings();
           }),
       );

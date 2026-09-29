@@ -46,6 +46,7 @@ import {
   typingDiagnostics,
 } from "./shared/editorKit";
 import { InlineSuggestions, keyArbiter } from "./shared/keyArbiter";
+import { liveInput, livePreviewCompartment } from "./shared/livePreview";
 import {
   ActivationInfo,
   CompletionEdit,
@@ -67,6 +68,11 @@ export interface TypstEditorHost {
   /** This state's YOLO render extension (`YoloBridge.extension`). */
   yolo?: Extension;
   hover?: Extension;
+  /**
+   * Live preview (`livePreview(...)`, typstLive.ts) or nothing (source mode): the content of
+   * `livePreviewCompartment`, which the mode toggle reconfigures.
+   */
+  live?: Extension;
   renderInfo?: InfoRenderer;
   /** Committed edits; never called while an IME composition is open. */
   onEdit?(view: EditorView, changes: ChangeSet, startDoc: Text): void;
@@ -122,6 +128,9 @@ export function typstEditorExtensions(
     typstLanguage,
     typstHighlightPlugin,
     semanticTokensExtension,
+    // Mounted in both modes: a field added by a reconfiguration misses that transaction.
+    liveInput(),
+    livePreviewCompartment.of(host.live ?? []),
     lintGutter(),
     // tinymist publishes per keystroke: new diagnostics on the line being typed wait for a
     // pause (TypstView sets them through setTypingDiagnostics).
@@ -288,6 +297,50 @@ function codeQuote(s: string, i: number): boolean {
   return /(?:^|[^\w-])(?:import|include)$/.test(s.slice(Math.max(0, j - 8), j + 1));
 }
 
+/** After a comment starting at `i` (`//` not after `:`, a URL; `/*` nested), or -1. */
+function commentEnd(s: string, i: number): number {
+  if (s[i] !== "/") return -1;
+  if (s[i + 1] === "/" && s[i - 1] !== ":") {
+    const at = s.indexOf("\n", i);
+    return at < 0 ? s.length : at;
+  }
+  if (s[i + 1] !== "*") return -1;
+  let depth = 1;
+  i += 2;
+  while (i < s.length && depth > 0) {
+    if (s.startsWith("/*", i)) (depth++, (i += 2));
+    else if (s.startsWith("*/", i)) (depth--, (i += 2));
+    else i++;
+  }
+  return i;
+}
+
+/** After a string whose opening quote is at `i` (it ends at its quote or the line end). */
+function stringEnd(s: string, i: number): number {
+  i++;
+  while (i < s.length && s[i] !== '"' && s[i] !== "\n") i += s[i] === "\\" ? 2 : 1;
+  return i + 1;
+}
+
+/**
+ * The closing `$` of a formula whose content starts at `i` (just after its opening `$`),
+ * or the text's length when it is unclosed: escapes, comments and strings are skipped.
+ * typstMathSpans pairs dollars by this rule, and so does the live-preview scanner.
+ */
+export function mathClose(s: string, i: number): number {
+  while (i < s.length) {
+    const ch = s[i];
+    if (ch === "$") return i;
+    if (ch === "\\") i += 2;
+    else if (ch === '"') i = stringEnd(s, i);
+    else {
+      const end = commentEnd(s, i);
+      i = end < 0 ? i + 1 : end;
+    }
+  }
+  return s.length;
+}
+
 /**
  * Math spans of a Typst document as [from0, to0, from1, to1, ...]: `from` is just after
  * the opening `$`, `to` the closing `$` (the document end when unclosed). A lexical
@@ -300,44 +353,34 @@ export function typstMathSpans(doc: Text): number[] {
   const spans: number[] = [];
   const s = doc.toString();
   const n = s.length;
-  let math = false;
   let i = 0;
-  const skipTo = (needle: string, from: number) => {
-    const at = s.indexOf(needle, from);
-    return at < 0 ? n : at + needle.length;
-  };
   while (i < n) {
     const ch = s[i];
+    const comment = commentEnd(s, i);
     if (ch === "\\") {
       i += 2;
-    } else if (ch === "/" && s[i + 1] === "/" && s[i - 1] !== ":") {
-      i = skipTo("\n", i);
-    } else if (ch === "/" && s[i + 1] === "*") {
-      let depth = 1;
-      i += 2;
-      while (i < n && depth > 0) {
-        if (s.startsWith("/*", i)) (depth++, (i += 2));
-        else if (s.startsWith("*/", i)) (depth--, (i += 2));
-        else i++;
-      }
-    } else if (ch === "`" && !math) {
+    } else if (comment >= 0) {
+      i = comment;
+    } else if (ch === "`") {
       let k = 1;
       while (s[i + k] === "`") k++;
       // `` is an empty raw; ``` opens a block closed by the same run.
-      i = k === 2 ? i + 2 : skipTo(k >= 3 ? "`".repeat(k) : "`", i + k);
-    } else if (ch === '"' && (math || codeQuote(s, i))) {
-      i++;
-      while (i < n && s[i] !== '"' && s[i] !== "\n") i += s[i] === "\\" ? 2 : 1;
-      i++;
+      if (k === 2) i += 2;
+      else {
+        const close = k >= 3 ? "`".repeat(k) : "`";
+        const at = s.indexOf(close, i + k);
+        i = at < 0 ? n : at + close.length;
+      }
+    } else if (ch === '"' && codeQuote(s, i)) {
+      i = stringEnd(s, i);
     } else if (ch === "$") {
-      spans.push(math ? i : i + 1);
-      math = !math;
-      i++;
+      const close = mathClose(s, i + 1);
+      spans.push(i + 1, close);
+      i = close + 1;
     } else {
       i++;
     }
   }
-  if (math) spans.push(n);
   spanCache.set(doc, spans);
   return spans;
 }

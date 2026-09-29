@@ -12,7 +12,11 @@ export const FRAGMENT_DOC = ".obsidian-tinymist-fragment.typ";
 export class FragmentError extends Error {
   constructor(
     message: string,
-    /** The fragment document's line (1-based) of the first error, when Typst located it there. */
+    /**
+     * The fragment document's line (1-based) of the first error: where Typst located it, or
+     * where its trace enters the fragment (the import of a broken template, the call of a
+     * template function the formula makes).
+     */
     readonly line: number | null = null,
   ) {
     super(message);
@@ -220,9 +224,12 @@ export class TypstFragmentRenderer {
  * Typst's diagnostic from a failed `tinymist.exportSvg` ("... document is not available
  * for export: \"error: unclosed delimiter\n  ┌─ <file>:6:98 ...\""): the error messages and
  * hints, with the file and line when an error lies outside the fragment document (a
- * template, an import), and the fragment document's line when the first one lies in it.
- * Null when the message carries no Typst error (a server state, which a later render may
- * not repeat).
+ * template, an import), and the fragment document's line of the first error: its own
+ * location there, else the first row of its trace there ("help: while importing" points at
+ * the preamble's import of a broken template, "help: while calling" at the formula calling a
+ * template function). Lines repeated verbatim (the same error reached through two imports)
+ * show once. Null when the message carries no Typst error (a server state, which a later
+ * render may not repeat).
  */
 export function typstExportError(message: string, root: string): FragmentError | null {
   const m = /not available for export: "([\s\S]*)"\s*$/.exec(message);
@@ -232,23 +239,24 @@ export function typstExportError(message: string, root: string): FragmentError |
   );
   const out: string[] = [];
   let line: number | null = null;
-  let located = false;
+  let errors = 0;
   for (const row of text.split("\n")) {
     const error = /^error: (.*)$/.exec(row);
     const at = /^\s*┌─ (.*?):(\d+):\d+\s*$/.exec(row);
     const hint = /^\s*= hint: (.*)$/.exec(row);
-    if (error) out.push(error[1]);
-    else if (hint) out.push(`hint: ${hint[1]}`);
+    if (error) {
+      out.push(error[1]);
+      errors++;
+    } else if (hint) out.push(`hint: ${hint[1]}`);
     else if (at && out.length) {
       if (basename(at[1]) === FRAGMENT_DOC) {
-        if (!located) line = +at[2];
+        if (line === null && errors === 1) line = +at[2];
       } else {
         out[out.length - 1] += ` (${vaultPath(at[1], root)}:${at[2]})`;
       }
-      located = true;
     }
   }
-  return out.length ? new FragmentError(out.join("\n"), line) : null;
+  return out.length ? new FragmentError([...new Set(out)].join("\n"), line) : null;
 }
 
 /** A file as the vault shows it (`book/template.typ`), or its name outside the vault. */

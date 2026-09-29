@@ -15,7 +15,7 @@ import {
 } from "obsidian";
 import { HistoryCache } from "./editor/shared/editorKit";
 import { YoloBridge } from "./editor/shared/yoloBridge";
-import { TypstRender } from "./editor/typstRender";
+import { FileEvent, TypstRender } from "./editor/typstRender";
 import { LspTextEdit, TypstView, VIEW_TYPE_TYPST } from "./editor/typstView";
 import { LspClient, LspStatus, uriToPath } from "./lsp/client";
 import { TypstFragmentRenderer } from "./lsp/fragmentRenderer";
@@ -74,6 +74,28 @@ export default class TinymistPlugin extends Plugin {
         const view = this.app.workspace.getActiveViewOfType(TypstView);
         if (!view?.absolutePath()) return false;
         if (!checking) void this.openPreview(view);
+        return true;
+      },
+    });
+
+    this.addCommand({
+      id: "toggle-live-preview",
+      name: "Toggle live preview",
+      checkCallback: (checking) => {
+        const view = this.app.workspace.getActiveViewOfType(TypstView);
+        if (!view) return false;
+        if (!checking) view.toggleMode();
+        return true;
+      },
+    });
+
+    this.addCommand({
+      id: "show-render-statistics",
+      name: "Show render statistics",
+      checkCallback: (checking) => {
+        const view = this.app.workspace.getActiveViewOfType(TypstView);
+        if (view?.editingMode !== "live") return false;
+        if (!checking) new Notice(`Tinymist live preview: ${view.renderStatistics() ?? "not rendering"}`, 10000);
         return true;
       },
     });
@@ -157,25 +179,25 @@ export default class TinymistPlugin extends Plugin {
 
     this.app.workspace.onLayoutReady(() => {
       void this.startLsp(false);
-      // Formula renders depend on the files their preamble imports (templates, alias
-      // files). Registered after layout-ready, so the vault's initial create events do not
-      // count; a folder counts when it goes or moves (it may hold .typ files).
+      // Formula renders depend on the files their preamble reads (the book main, templates,
+      // alias files). Registered after layout-ready, so the vault's initial create events do
+      // not count; a folder counts when it goes or moves (it may hold .typ files).
       const typ = (file: TAbstractFile) => !(file instanceof TFile) || file.extension === "typ";
-      const changed = (...paths: string[]) => {
+      const changed = (event: FileEvent, ...paths: string[]) => {
         const root = this.vaultBasePath();
-        if (root) for (const p of paths) this.typstRender?.fileChanged(join(root, p));
+        if (root) for (const p of paths) this.typstRender?.fileChanged(join(root, p), event);
       };
       this.registerEvent(
-        this.app.vault.on("modify", (file) => file instanceof TFile && typ(file) && changed(file.path)),
+        this.app.vault.on("modify", (file) => file instanceof TFile && typ(file) && changed("modify", file.path)),
       );
       this.registerEvent(
-        this.app.vault.on("create", (file) => file instanceof TFile && typ(file) && changed(file.path)),
+        this.app.vault.on("create", (file) => file instanceof TFile && typ(file) && changed("create", file.path)),
       );
-      this.registerEvent(this.app.vault.on("delete", (file) => typ(file) && changed(file.path)));
+      this.registerEvent(this.app.vault.on("delete", (file) => typ(file) && changed("delete", file.path)));
       this.registerEvent(
         this.app.vault.on(
           "rename",
-          (file, oldPath) => (typ(file) || oldPath.endsWith(".typ")) && changed(file.path, oldPath),
+          (file, oldPath) => (typ(file) || oldPath.endsWith(".typ")) && changed("rename", file.path, oldPath),
         ),
       );
     });
@@ -196,8 +218,10 @@ export default class TinymistPlugin extends Plugin {
 
   async saveSettings(): Promise<void> {
     this.resolvedBinary = undefined;
-    // The renderer restarts with the (possibly new) binary at its next render.
+    // The renderer restarts with the (possibly new) binary at its next render, and live
+    // views try again the formulas that failed for want of it.
     this.fragments?.stop();
+    this.typstRender?.retryFailed();
     await this.saveData(this.settings);
   }
 

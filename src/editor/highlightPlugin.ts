@@ -28,7 +28,7 @@ interface TokState {
   inMath: boolean;
 }
 
-const TRIGGER = /[#@<"`*_$/=]/;
+const TRIGGER = /[\\#@<"`*_$/=]/;
 
 function tokenizeLine(
   text: string,
@@ -65,7 +65,8 @@ function tokenizeLine(
     }
     if (s.inMath) {
       const start = i;
-      while (i < n && text[i] !== "$") i++;
+      // An escape (`\$`) is part of the math.
+      while (i < n && text[i] !== "$") i = Math.min(n, i + (text[i] === "\\" ? 2 : 1));
       if (i > start) push(lineStart + start, lineStart + i, "tym-math");
       if (i < n) {
         push(lineStart + i, lineStart + i + 1, "tym-keyword");
@@ -77,6 +78,10 @@ function tokenizeLine(
     const ch = text[i];
     if (!TRIGGER.test(ch)) {
       i++;
+      continue;
+    }
+    if (ch === "\\") {
+      i += 2; // an escape: `\$5` is text, not math
       continue;
     }
     if (text.startsWith("//", i)) {

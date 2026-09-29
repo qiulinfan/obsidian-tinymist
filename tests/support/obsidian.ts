@@ -2,7 +2,9 @@
 // the plugin's views mount in jsdom. It models only the documented behaviour the views
 // rely on, not Obsidian's implementation: TextFileView.requestSave debounces save(), and
 // save() writes getViewData() through vault.modify when it changed since the last load or
-// save (save(true), on close, also calls clear()).
+// save (save(true), on close, also calls clear()); getState() is `{ file }`, and setState()
+// loads `state.file` when it is another file. Notices are recorded in `Notice.shown`;
+// setIcon records the icon in `data-icon`.
 
 type Callback = (...args: unknown[]) => unknown;
 
@@ -21,6 +23,21 @@ export class Scope {
     this.keys.push(handler);
     return handler;
   }
+}
+
+export class Notice {
+  static shown: string[] = [];
+  constructor(message: string, _timeout?: number) {
+    Notice.shown.push(message);
+  }
+}
+
+export function setIcon(el: HTMLElement, icon: string): void {
+  el.dataset.icon = icon;
+}
+
+export interface ViewStateResult {
+  history: boolean;
 }
 
 export const MarkdownRenderer = {
@@ -58,12 +75,19 @@ export class TestVault {
 export interface TestApp {
   vault: TestVault;
   scope: Scope;
-  workspace: { on(...args: unknown[]): unknown };
+  workspace: { on(...args: unknown[]): unknown; requestSaveLayout(): void; layoutSaves: number };
   plugins: { plugins: Record<string, unknown> };
 }
 
 export function testApp(): TestApp {
-  return { vault: new TestVault(), scope: new Scope(), workspace: { on: () => ({}) }, plugins: { plugins: {} } };
+  const workspace = {
+    layoutSaves: 0,
+    on: () => ({}),
+    requestSaveLayout() {
+      workspace.layoutSaves++;
+    },
+  };
+  return { vault: new TestVault(), scope: new Scope(), workspace, plugins: { plugins: {} } };
 }
 
 export class WorkspaceLeaf {
@@ -133,13 +157,30 @@ export abstract class TextFileView extends Component {
     this.contentEl.remove();
   }
 
+  getState(): Record<string, unknown> {
+    return this.file ? { file: this.file.path } : {};
+  }
+
+  async setState(state: unknown, _result: ViewStateResult): Promise<void> {
+    const path = (state as { file?: unknown } | null)?.file;
+    if (typeof path === "string" && path !== this.file?.path) await this.loadFile(new TFile(path));
+  }
+
   getEphemeralState(): Record<string, unknown> {
     return {};
   }
 
   setEphemeralState(_state: unknown): void {}
 
-  addAction(_icon: string, _title: string, _cb: Callback): HTMLElement {
-    return document.createElement("div");
+  /** The header actions, as Obsidian draws them: a clickable element with an aria-label. */
+  actions: HTMLElement[] = [];
+
+  addAction(icon: string, title: string, cb: Callback): HTMLElement {
+    const el = document.createElement("a");
+    el.dataset.icon = icon;
+    el.setAttribute("aria-label", title);
+    el.addEventListener("click", (e) => cb(e));
+    this.actions.push(el);
+    return el;
   }
 }

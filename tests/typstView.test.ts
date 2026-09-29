@@ -2,15 +2,18 @@
 import "./support/dom";
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { undoDepth } from "@codemirror/commands";
 import { forEachDiagnostic } from "@codemirror/lint";
+import { EditorSelection } from "@codemirror/state";
 import { EditorView, closeHoverTooltips } from "@codemirror/view";
 import { HistoryCache } from "../src/editor/shared/editorKit";
+import { isLive } from "../src/editor/shared/livePreview";
 import { YoloBridge } from "../src/editor/shared/yoloBridge";
 import { TypstRender } from "../src/editor/typstRender";
 import { TypstView } from "../src/editor/typstView";
 import { LspDiagnostic, pathToUri } from "../src/lsp/client";
 import type TinymistPlugin from "../src/main";
-import { TFile, TextFileView, WorkspaceLeaf, testApp } from "./support/obsidian";
+import { Notice, TFile, TextFileView, WorkspaceLeaf, testApp } from "./support/obsidian";
 import { sleep } from "./support/keyMatrix";
 
 /** `plugin` overrides fields of the stand-in plugin. */
@@ -49,7 +52,7 @@ function typstView(saveDebounceMs: number, plugin: Record<string, unknown> = {})
     ...plugin,
   };
   const view = new TypstView(new WorkspaceLeaf(app) as never, stub as unknown as TinymistPlugin);
-  return { view, vault: app.vault, didSave, publish };
+  return { view, vault: app.vault, app, didSave, publish };
 }
 
 function insert(cm: EditorView, from: number, to: number, text: string, compose: boolean) {
@@ -338,6 +341,156 @@ test("tinymist's hover: closed by typing; in a rendered formula, not a symbol's 
     assert.deepEqual(sections(), []);
     settings.hoverRender = false;
     assert.deepEqual(await hoverAt("integral x"), ["tinymist"], "no render: tinymist's answer is all there is");
+  } finally {
+    await view.onClose();
+    typstRender.dispose();
+  }
+});
+
+// ---- live preview: the editing mode -----------------------------------------------------------
+
+/** A TypstRender whose backend answers every fragment with a small page, counting calls. */
+function fakeTypstRender() {
+  const calls: string[] = [];
+  const dirs: string[] = [];
+  const typstRender = new TypstRender(
+    {
+      async render(dir, source) {
+        calls.push(source);
+        dirs.push(dir);
+        return '<svg viewBox="0 0 10 12" width="10pt" height="12pt" xmlns="http://www.w3.org/2000/svg"><path fill="#0a0b0c" d="M 0 0"/></svg>';
+      },
+    },
+    "/vault",
+  );
+  return { typstRender, calls, dirs };
+}
+
+const liveWidgets = (cm: EditorView) => cm.contentDOM.querySelectorAll(".lsp-lp-render:not(.is-below)").length;
+
+async function waitUntil(pred: () => boolean, what: string, timeout = 2000): Promise<void> {
+  const t0 = Date.now();
+  while (!pred()) {
+    if (Date.now() - t0 > timeout) throw new Error(`timed out waiting for ${what}`);
+    await sleep(5);
+  }
+}
+
+test("editing mode: the setting's default, the view state, the header action and the toggle keep the editor's state", async () => {
+  const { typstRender, dirs } = fakeTypstRender();
+  const settings = { saveDebounceMs: 100000, hoverRender: true, editingMode: "source" };
+  const { view, vault, app } = typstView(100000, { settings, typstRender });
+  vault.files.set("a.typ", "Intro $x^2$ here\n$ y $\n");
+  vault.files.set("b.typ", "Other $z$\n");
+  await view.loadFile(new TFile("a.typ") as never);
+  try {
+    let cm = view.cm!;
+    const [action] = view.actions;
+    assert.equal(view.editingMode, "source", "the default");
+    assert.deepEqual(view.getState(), { file: "a.typ", mode: "source" });
+    assert.deepEqual([action.dataset.icon, action.getAttribute("aria-label")], ["book-open", "Switch to live preview"]);
+    assert.equal(isLive(cm.state), false);
+
+    // An edit and a selection, then the header action: live, with the same state.
+    cm.dispatch({ changes: { from: 0, insert: "An " }, userEvent: "input.type" });
+    cm.dispatch({ selection: EditorSelection.single(1, 3) });
+    const doc = cm.state.doc;
+    action.click();
+    assert.equal(view.editingMode, "live");
+    assert.equal(isLive(cm.state), true);
+    assert.equal(cm.state.doc, doc);
+    assert.deepEqual([cm.state.selection.main.anchor, cm.state.selection.main.head], [1, 3]);
+    assert.equal(undoDepth(cm.state), 1);
+    assert.deepEqual([action.dataset.icon, action.getAttribute("aria-label")], ["code", "Switch to source mode"]);
+    assert.ok(view.contentEl.classList.contains("is-live-preview"));
+    assert.equal(app.workspace.layoutSaves, 1, "the layout (and the mode) is saved");
+    assert.deepEqual(view.getState(), { file: "a.typ", mode: "live" });
+    await waitUntil(() => liveWidgets(cm) === 2, "widgets");
+    assert.match(view.renderStatistics()!, /^2 renders/);
+
+    // The command's toggle, and back.
+    view.toggleMode();
+    assert.equal(isLive(cm.state), false);
+    assert.equal(liveWidgets(cm), 0);
+    assert.equal(view.renderStatistics(), null);
+    assert.ok(!view.contentEl.classList.contains("is-live-preview"));
+    view.toggleMode();
+    assert.equal(liveWidgets(cm), 2, "its renders are kept across the switch");
+
+    // Obsidian restores a leaf with its state: the mode comes with it; a state without one
+    // (another file opened in the leaf) keeps the leaf's mode, as in Markdown views.
+    await view.setState({ file: "a.typ", mode: "source" }, { history: false });
+    assert.equal(isLive(cm.state), false, "the same file, not reloaded");
+    await view.setState({ file: "a.typ", mode: "live" }, { history: false });
+    assert.equal(isLive(cm.state), true);
+    await view.setState({ file: "b.typ" }, { history: false });
+    cm = view.cm!;
+    assert.equal(view.editingMode, "live");
+    assert.equal(isLive(cm.state), true);
+    await waitUntil(() => liveWidgets(cm) === 1, "b.typ's widget");
+    await view.setState({ file: "a.typ", mode: "source" }, { history: false });
+    assert.equal(isLive(view.cm!.state), false);
+
+    // Renamed (moved) in live mode: renders start afresh from the new folder.
+    await view.setState({ file: "a.typ", mode: "live" }, { history: false });
+    await waitUntil(() => liveWidgets(view.cm!) === 2, "widgets before the move");
+    const n = dirs.length;
+    view.file = new TFile("sub/a.typ");
+    await view.onRename(view.file as never);
+    await waitUntil(() => dirs.length === n + 2 && liveWidgets(view.cm!) === 2, "widgets after the move");
+    assert.deepEqual(dirs.slice(n), ["/vault/sub", "/vault/sub"]);
+  } finally {
+    await view.onClose();
+    typstRender.dispose();
+  }
+});
+
+test("editing mode: a reopened file's cached history comes back in the view's mode", async () => {
+  const { typstRender } = fakeTypstRender();
+  const settings = { saveDebounceMs: 100000, hoverRender: true, editingMode: "live" };
+  const { view, vault } = typstView(100000, { settings, typstRender });
+  vault.files.set("a.typ", "Intro $x$\n");
+  vault.files.set("b.typ", "Other\n");
+  try {
+    await view.loadFile(new TFile("a.typ") as never);
+    assert.equal(view.editingMode, "live", "the setting's default");
+    let cm = view.cm!;
+    await waitUntil(() => liveWidgets(cm) === 1, "widget");
+    cm.dispatch({ changes: { from: cm.state.doc.length, insert: "more\n" }, userEvent: "input.type" });
+    await view.setState({ file: "b.typ", mode: "source" }, { history: false });
+    await view.setState({ file: "a.typ", mode: "live" }, { history: false });
+    cm = view.cm!;
+    assert.equal(undoDepth(cm.state), 1, "the cached history");
+    assert.equal(isLive(cm.state), true, "restored with the live compartment");
+    await waitUntil(() => liveWidgets(cm) === 1, "widget again");
+  } finally {
+    await view.onClose();
+    typstRender.dispose();
+  }
+});
+
+test("editing mode: live preview refuses files over 10,000 lines", async () => {
+  const { typstRender, calls } = fakeTypstRender();
+  const settings = { saveDebounceMs: 100000, hoverRender: true, editingMode: "source" };
+  const { view, vault } = typstView(100000, { settings, typstRender });
+  const long = Array.from({ length: 10001 }, (_, i) => `line ${i} $x_${i}$`).join("\n");
+  vault.files.set("long.typ", long);
+  vault.files.set("short.typ", "$x$\n");
+  Notice.shown.length = 0;
+  try {
+    await view.loadFile(new TFile("long.typ") as never);
+    assert.equal(view.setMode("live"), false);
+    assert.equal(view.editingMode, "source");
+    assert.equal(isLive(view.cm!.state), false);
+    assert.deepEqual(Notice.shown, ["Tinymist: live preview is limited to 10,000 lines (this file has 10,001)."]);
+    // Opened in live mode (a restored leaf, the default setting): source.
+    await view.setState({ file: "short.typ", mode: "live" }, { history: false });
+    assert.equal(isLive(view.cm!.state), true);
+    await view.setState({ file: "long.typ", mode: "live" }, { history: false });
+    assert.equal(view.editingMode, "source");
+    assert.equal(isLive(view.cm!.state), false);
+    await sleep(50);
+    assert.ok(!calls.some((c) => c.includes("$x_1$")), "nothing rendered");
   } finally {
     await view.onClose();
     typstRender.dispose();
