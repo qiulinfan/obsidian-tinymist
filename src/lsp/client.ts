@@ -28,6 +28,30 @@ export function uriToPath(uri: string): string {
   return fileURLToPath(uri);
 }
 
+/**
+ * The form pathToUri produces for a server URI. Servers percent-encode differently
+ * (`&`, `^`, CJK), and diagnostics are routed by exact URI.
+ */
+export function canonicalUri(uri: string): string {
+  try {
+    return pathToUri(uriToPath(uri));
+  } catch {
+    return uri;
+  }
+}
+
+/** LSP CompletionContext (1 Invoked, 2 TriggerCharacter, 3 TriggerForIncompleteCompletions). */
+export interface LspCompletionContext {
+  triggerKind: number;
+  triggerCharacter?: string;
+}
+
+/** One incremental textDocument/didChange entry. */
+export interface LspContentChange {
+  range: LspRange;
+  text: string;
+}
+
 interface Pending {
   resolve: (v: unknown) => void;
   reject: (e: Error) => void;
@@ -35,9 +59,9 @@ interface Pending {
 }
 
 /**
- * Minimal LSP client over stdio. Full-text document sync only. Unknown
- * server->client requests are answered with a null result on purpose; extend
- * explicitly when a feature needs more.
+ * Minimal LSP client over stdio. Document sync is full text or incremental,
+ * as the caller chooses. Unknown server->client requests are answered with a
+ * null result on purpose; extend explicitly when a feature needs more.
  */
 export class LspClient {
   status: LspStatus = "stopped";
@@ -52,6 +76,8 @@ export class LspClient {
   private notificationHandlers = new Map<string, (params: unknown) => void>();
   /** Raw server capabilities from the initialize response. */
   serverCapabilities: Record<string, unknown> | null = null;
+  /** The file tinymist compiles as main (null: whichever file is focused). */
+  mainFile: string | null = null;
   private configuration = {
     exportPdf: "never",
     formatterMode: "typstyle",
@@ -104,10 +130,26 @@ export class LspClient {
             textDocument: {
               synchronization: { didSave: true },
               publishDiagnostics: { relatedInformation: false },
+              // What src/editor/shared/lspCompletion.ts handles: contexts,
+              // numbered snippets, labelDetails, InsertReplaceEdit ranges and
+              // additionalTextEdits (always applied), list item defaults.
               completion: {
+                contextSupport: true,
                 completionItem: {
                   snippetSupport: true,
+                  labelDetailsSupport: true,
+                  insertReplaceSupport: true,
+                  deprecatedSupport: true,
+                  preselectSupport: true,
+                  tagSupport: { valueSet: [1] },
                   documentationFormat: ["markdown", "plaintext"],
+                },
+                completionList: {
+                  itemDefaults: [
+                    "editRange",
+                    "insertTextFormat",
+                    "data",
+                  ],
                 },
               },
               hover: { contentFormat: ["markdown", "plaintext"] },
@@ -169,6 +211,17 @@ export class LspClient {
     if (JSON.stringify(args) === JSON.stringify(this.configuration.typstExtraArgs)) return;
     this.configuration.typstExtraArgs = args;
     this.notify("workspace/didChangeConfiguration", { settings: this.configuration });
+    // A configuration change resets tinymist's entry: label completion comes back
+    // empty, and every request fails while a main was pinned, until it is set again.
+    this.pinMain(this.mainFile);
+  }
+
+  /** Pin tinymist's main file (null: follow the focused file again). */
+  pinMain(path: string | null): void {
+    this.mainFile = path;
+    this.executeCommand("tinymist.pinMain", [path]).catch((err) => {
+      console.warn("[tinymist] pinMain failed:", err);
+    });
   }
 
   stop(): void {
@@ -197,12 +250,21 @@ export class LspClient {
   }
 
   didChange(path: string, text: string): void {
+    this.sendChanges(path, [{ text }]);
+  }
+
+  /** Incremental sync: `changes` apply in order, each to the result of the previous. */
+  didChangeRanges(path: string, changes: LspContentChange[]): void {
+    if (changes.length) this.sendChanges(path, changes);
+  }
+
+  private sendChanges(path: string, contentChanges: unknown[]): void {
     const uri = pathToUri(path);
     const version = (this.versions.get(uri) ?? 1) + 1;
     this.versions.set(uri, version);
     this.notify("textDocument/didChange", {
       textDocument: { uri, version },
-      contentChanges: [{ text }],
+      contentChanges,
     });
   }
 
@@ -218,12 +280,24 @@ export class LspClient {
     this.notify("textDocument/didClose", { textDocument: { uri } });
   }
 
-  completion(path: string, pos: LspPosition): Promise<unknown> {
+  completion(
+    path: string,
+    pos: LspPosition,
+    context?: LspCompletionContext,
+  ): Promise<unknown> {
     return this.request(
       "textDocument/completion",
-      { textDocument: { uri: pathToUri(path) }, position: pos },
+      { textDocument: { uri: pathToUri(path) }, position: pos, context },
       5000,
     );
+  }
+
+  /** completionProvider.triggerCharacters from the initialize result. */
+  completionTriggerCharacters(): string[] {
+    const provider = this.serverCapabilities?.completionProvider as
+      | { triggerCharacters?: string[] }
+      | undefined;
+    return provider?.triggerCharacters ?? [];
   }
 
   hover(path: string, pos: LspPosition): Promise<unknown> {
@@ -350,8 +424,9 @@ export class LspClient {
           uri: string;
           diagnostics?: LspDiagnostic[];
         };
-        this.diagnosticsByUri.set(params.uri, params.diagnostics ?? []);
-        this.onDiagnostics(params.uri);
+        const uri = canonicalUri(params.uri);
+        this.diagnosticsByUri.set(uri, params.diagnostics ?? []);
+        this.onDiagnostics(uri);
         return;
       }
       const handler = this.notificationHandlers.get(msg.method);

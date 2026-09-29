@@ -6,14 +6,21 @@ import {
   ViewPlugin,
   ViewUpdate,
 } from "@codemirror/view";
-import { semanticActiveField, setSemanticActive } from "./semanticTokens";
+import {
+  markSemanticStale,
+  overlapsStale,
+  semanticActiveField,
+  semanticStaleField,
+  setSemanticActive,
+  setSemanticTokens,
+} from "./semanticTokens";
 
 /**
  * Obsidian inlines its own copy of the CM6 language plumbing, so Lezer
  * style props attached by the exposed modules never reach its highlight
  * pass. We therefore tokenize directly and emit class decorations
- * ourselves. LSP semantic tokens (roadmap v0.2) will reuse this
- * decoration pipeline.
+ * ourselves. Once LSP semantic tokens are live, this only fills in the
+ * lines edited since the last semantic response.
  */
 
 interface TokState {
@@ -111,8 +118,10 @@ const MAX_TOKENIZE_LENGTH = 500_000;
 
 function buildDecorations(view: EditorView): DecorationSet {
   const doc = view.state.doc;
-  // LSP semantic tokens supersede the baseline tokenizer once available.
-  if (view.state.field(semanticActiveField, false)) return Decoration.none;
+  // LSP semantic tokens supersede the baseline tokenizer except on stale lines.
+  const semantic = view.state.field(semanticActiveField, false) ?? false;
+  const stale = view.state.field(semanticStaleField, false) ?? [];
+  if (semantic && !stale.length) return Decoration.none;
   if (doc.length > MAX_TOKENIZE_LENGTH) return Decoration.none;
   const end = view.visibleRanges.length
     ? view.visibleRanges[view.visibleRanges.length - 1].to
@@ -122,8 +131,9 @@ function buildDecorations(view: EditorView): DecorationSet {
   for (let lineNo = 1; lineNo <= doc.lines; lineNo++) {
     const line = doc.line(lineNo);
     if (line.from > end) break;
+    const draw = !semantic || overlapsStale(stale, line.from, line.to);
     tokenizeLine(line.text, line.from, true, state, (from, to, cls) => {
-      builder.add(from, to, Decoration.mark({ class: cls }));
+      if (draw) builder.add(from, to, Decoration.mark({ class: cls }));
     });
   }
   return builder.finish();
@@ -138,10 +148,15 @@ export const typstHighlightPlugin = ViewPlugin.fromClass(
     }
 
     update(update: ViewUpdate): void {
-      const semanticFlipped = update.transactions.some((tr) =>
-        tr.effects.some((e) => e.is(setSemanticActive)),
+      const semanticChanged = update.transactions.some((tr) =>
+        tr.effects.some(
+          (e) =>
+            e.is(setSemanticActive) ||
+            e.is(setSemanticTokens) ||
+            e.is(markSemanticStale),
+        ),
       );
-      if (update.docChanged || update.viewportChanged || semanticFlipped) {
+      if (update.docChanged || update.viewportChanged || semanticChanged) {
         this.decorations = buildDecorations(update.view);
       }
     }

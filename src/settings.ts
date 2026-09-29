@@ -10,6 +10,8 @@ export interface TinymistSettings {
   invertPreviewColors: "never" | "auto";
   /** Experimental: drive the YOLO plugin's AI tab completion in .typ files. */
   yoloTabCompletion: boolean;
+  /** Compile a chapter through the book main.typ that includes it. */
+  pinBookMain: boolean;
 }
 
 export const DEFAULT_SETTINGS: TinymistSettings = {
@@ -17,6 +19,7 @@ export const DEFAULT_SETTINGS: TinymistSettings = {
   saveDebounceMs: 500,
   invertPreviewColors: "never",
   yoloTabCompletion: false,
+  pinBookMain: true,
 };
 
 export class TinymistSettingTab extends PluginSettingTab {
@@ -63,18 +66,42 @@ export class TinymistSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("YOLO tab completion (experimental)")
+      .setName("Compile chapters through their book")
       .setDesc(
-        "Drive the YOLO plugin's AI tab completion inside Typst files. " +
-          "Requires the YOLO plugin with tab completion enabled; reopen " +
-          ".typ files after changing. May break when YOLO updates.",
+        "When a chapter is included by a main.typ above it, compile it through " +
+          "that file, so @ completes labels from every chapter and diagnostics " +
+          "see the book's imports.",
       )
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.pinBookMain)
+          .onChange(async (value) => {
+            this.plugin.settings.pinBookMain = value;
+            await this.plugin.saveSettings();
+            this.plugin.syncPinnedMain();
+          }),
+      );
+
+    const yoloDesc = () =>
+      "Show the YOLO plugin's AI completion (ghost text) in Typst files: Tab " +
+      "accepts, Shift-Tab or Escape dismisses, and the completion popup always " +
+      "wins. Uses YOLO's own triggers and its tab-completion toggle. May break " +
+      "when YOLO updates. Status: " +
+      (this.plugin.settings.yoloTabCompletion
+        ? this.plugin.yolo.describe()
+        : "off") +
+      ".";
+    const yolo = new Setting(containerEl)
+      .setName("YOLO tab completion (experimental)")
+      .setDesc(yoloDesc())
       .addToggle((toggle) =>
         toggle
           .setValue(this.plugin.settings.yoloTabCompletion)
           .onChange(async (value) => {
             this.plugin.settings.yoloTabCompletion = value;
             await this.plugin.saveSettings();
+            this.plugin.yolo.refresh();
+            yolo.setDesc(yoloDesc());
           }),
       );
 

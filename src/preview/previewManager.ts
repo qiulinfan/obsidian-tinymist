@@ -131,6 +131,8 @@ export class PreviewManager {
         .executeCommand("tinymist.doKillPreview", [taskId], 5000)
         .catch(() => {});
       lsp.setPreviewSource();
+      // The preview took over tinymist's main; hand it back to the editor.
+      lsp.pinMain(lsp.mainFile);
     }
   }
 }

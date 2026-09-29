@@ -2,6 +2,7 @@ import { spawnSync } from "child_process";
 import { existsSync } from "fs";
 import { homedir } from "os";
 import { isAbsolute, join, relative, sep } from "path";
+import { startCompletion } from "@codemirror/autocomplete";
 import {
   App,
   FileSystemAdapter,
@@ -11,8 +12,11 @@ import {
   TFile,
   WorkspaceLeaf,
 } from "obsidian";
+import { HistoryCache } from "./editor/shared/editorKit";
+import { YoloBridge } from "./editor/shared/yoloBridge";
 import { LspTextEdit, TypstView, VIEW_TYPE_TYPST } from "./editor/typstView";
 import { LspClient, LspStatus, uriToPath } from "./lsp/client";
+import { bookMain } from "./preview/previewEntry";
 import { PreviewManager, SourceJump } from "./preview/previewManager";
 import { PreviewView, VIEW_TYPE_TYPST_PREVIEW } from "./preview/previewView";
 import {
@@ -25,6 +29,10 @@ export default class TinymistPlugin extends Plugin {
   settings: TinymistSettings = DEFAULT_SETTINGS;
   lsp: LspClient | null = null;
   preview: PreviewManager = new PreviewManager(this);
+  /** Undo history of recently closed .typ files, restored on reopen. */
+  history = new HistoryCache();
+  /** YOLO AI completion in our editors; one per plugin, shared by every view. */
+  yolo!: YoloBridge;
 
   private diagListeners = new Set<(uri: string) => void>();
   private statusBarEl: HTMLElement | null = null;
@@ -32,6 +40,10 @@ export default class TinymistPlugin extends Plugin {
 
   async onload(): Promise<void> {
     await this.loadSettings();
+    this.yolo = new YoloBridge(this.app, {
+      name: "tinymist",
+      enabled: () => this.settings.yoloTabCompletion,
+    });
 
     this.registerView(VIEW_TYPE_TYPST, (leaf) => new TypstView(leaf, this));
     this.registerView(
@@ -93,13 +105,49 @@ export default class TinymistPlugin extends Plugin {
       },
     });
 
+    this.addCommand({
+      id: "trigger-completion",
+      name: "Trigger completion",
+      checkCallback: (checking) => {
+        const cm = this.app.workspace.getActiveViewOfType(TypstView)?.cm;
+        if (!cm) return false;
+        if (!checking) startCompletion(cm);
+        return true;
+      },
+    });
+
+    this.addCommand({
+      id: "trigger-ai-completion",
+      name: "Trigger AI completion (YOLO)",
+      checkCallback: (checking) => {
+        const cm = this.app.workspace.getActiveViewOfType(TypstView)?.cm;
+        if (!cm || !this.settings.yoloTabCompletion) return false;
+        if (!checking && !this.yolo.triggerNow(cm)) {
+          new Notice(`Tinymist: no AI completion here (${this.yolo.describe()}).`);
+        }
+        return true;
+      },
+    });
+
     this.addSettingTab(new TinymistSettingTab(this.app, this));
 
-    this.app.workspace.onLayoutReady(() => void this.startLsp(false));
+    this.registerEvent(
+      this.app.vault.on("rename", (file, oldPath) =>
+        this.history.rename(oldPath, file.path),
+      ),
+    );
+    this.registerEvent(
+      this.app.vault.on("delete", (file) => this.history.delete(file.path)),
+    );
+    this.registerEvent(
+      this.app.workspace.on("active-leaf-change", () => this.syncPinnedMain()),
+    );
 
+    this.app.workspace.onLayoutReady(() => void this.startLsp(false));
   }
 
   onunload(): void {
+    this.yolo.destroy();
     this.lsp?.stop();
     this.lsp = null;
     this.preview.stop();
@@ -207,6 +255,24 @@ export default class TinymistPlugin extends Plugin {
     for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_TYPST)) {
       if (leaf.view instanceof TypstView) leaf.view.reannounce();
     }
+    this.syncPinnedMain();
+  }
+
+  /**
+   * Compile the active chapter through its book's main.typ (see bookMain), so `@`
+   * completes labels from every chapter; standalone files compile on their own.
+   * Only the active Typst editor decides; other leaves leave the pin alone. A
+   * running preview owns tinymist's main until it stops (PreviewManager.stop).
+   */
+  syncPinnedMain(): void {
+    const lsp = this.lsp;
+    const path = this.app.workspace.getActiveViewOfType(TypstView)?.absolutePath();
+    const root = this.vaultBasePath();
+    if (!lsp || lsp.status !== "running" || !path || !root) return;
+    const main = this.settings.pinBookMain ? bookMain(path, root) : null;
+    if (main === lsp.mainFile) return;
+    if (this.preview.url) lsp.mainFile = main;
+    else lsp.pinMain(main);
   }
 
   /** Handle a preview-click jump pushed by the language server. */
@@ -334,6 +400,17 @@ export default class TinymistPlugin extends Plugin {
     return rel.split(sep).join("/");
   }
 
+  /** Mod-E: close the preview of this file, or open one. */
+  async togglePreview(view: TypstView): Promise<void> {
+    const leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE_TYPST_PREVIEW)[0];
+    const path = view.absolutePath();
+    if (leaf && path && this.preview.filePath === path) {
+      leaf.detach();
+      return;
+    }
+    await this.openPreview(view);
+  }
+
   async openPreview(view: TypstView): Promise<void> {
     const path = view.absolutePath();
     if (!path) return;
@@ -389,6 +466,7 @@ class RenameModal extends Modal {
 
   private async submit(): Promise<void> {
     const newName = this.input?.value.trim();
+    this.view.syncLsp();
     const pos = this.view.cursorPosition();
     const path = this.view.absolutePath();
     this.close();

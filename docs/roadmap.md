@@ -47,6 +47,26 @@ compiler, the language service, or the preview pipeline; we write the glue.
       using Tinymist inputs and original-source includes.
 - [x] Experimental YOLO bridge: drive the YOLO plugin's AI tab completion
       inside `.typ` editors (default-off setting; ghost text, Tab accept).
+- [x] Completion that keeps up: every server item (no truncation), trigger
+      characters and completion contexts, textEdit ranges (mid-word),
+      additionalTextEdits (postfix), numbered snippets, symbol glyphs and
+      docs; math-aware activation (2 letters in math) and ranking by the
+      document's own symbols.
+- [x] One key arbiter for Tab/Shift-Tab/Enter/Escape/arrows, shared with
+      obsidian-latex-live: Tab accepts, smart Enter (an exact match is a
+      newline), Tab typed ahead of the popup, list continuation on Enter.
+- [x] YOLO bridge rebuilt on YOLO's own triggers: no keymap clash, no reopen
+      after toggling, raw accept, file title with extension, contract check
+      (`npm run test:yolo`).
+- [x] Editor ergonomics: external changes merged as minimal diffs, per-file
+      undo history, cursor/scroll/focus restore, IME-aware sync and saves,
+      Obsidian hotkey scope (Mod-/, Mod-D, Mod-G, Mod-Enter, Mod-Alt-F,
+      Mod-B/Mod-I, Mod-E preview, Mod-F search), `$` and quote pairing,
+      comment toggling, themed caret, panels and tooltips.
+- [x] Incremental document sync; semantic tokens mapped through edits made
+      during a request, with the baseline tokenizer on edited lines.
+- [x] Cross-chapter labels: a chapter compiles through the book `main.typ`
+      that includes it (tinymist `pinMain`; setting, default on).
 - [ ] Find references UI and optional format-on-save.
 - [ ] Signature help, folding, document symbols/outline panel (the server
       already pushes outline notifications; needs a view).

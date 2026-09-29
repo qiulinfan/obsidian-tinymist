@@ -1,51 +1,39 @@
-import {
-  autocompletion,
-  closeBrackets,
-  closeBracketsKeymap,
-  completionKeymap,
-} from "@codemirror/autocomplete";
-import {
-  defaultKeymap,
-  history,
-  historyKeymap,
-  indentWithTab,
-} from "@codemirror/commands";
-import { bracketMatching } from "@codemirror/language";
-import { lintGutter, setDiagnostics } from "@codemirror/lint";
-import { highlightSelectionMatches, searchKeymap } from "@codemirror/search";
-import { EditorState } from "@codemirror/state";
-import {
-  EditorView,
-  drawSelection,
-  highlightActiveLine,
-  keymap,
-  lineNumbers,
-} from "@codemirror/view";
+import { setDiagnostics } from "@codemirror/lint";
+import { ChangeSet, EditorState, Text } from "@codemirror/state";
+import { EditorView, ViewUpdate } from "@codemirror/view";
 import { join } from "path";
-import { TextFileView, WorkspaceLeaf } from "obsidian";
+import { Scope, TextFileView, TFile, WorkspaceLeaf } from "obsidian";
 import { pathToUri, uriToPath } from "../lsp/client";
 import type TinymistPlugin from "../main";
-import { typstHighlightPlugin } from "./highlightPlugin";
 import {
-  lspCompletionSource,
   lspDiagnosticsToCm,
   lspHoverTooltip,
+  markdownInfoRenderer,
   offsetToPos,
   posToOffset,
 } from "./lspExtensions";
 import {
   SemanticLegend,
+  StaleRange,
   decodeSemanticTokens,
-  semanticTokensExtension,
+  markSemanticStale,
   setSemanticActive,
   setSemanticTokens,
 } from "./semanticTokens";
-import { typstLanguage } from "./typstLanguage";
 import {
-  YoloEditorShim,
-  getYoloPlugin,
-  yoloRenderExtension,
-} from "./yoloBridge";
+  EditorEphemeralState,
+  applyEphemeralState,
+  getEphemeralState,
+  registerEditorScope,
+  setDocText,
+  showSearch,
+  syncDarkTheme,
+} from "./shared/editorKit";
+import {
+  LspDocument,
+  tinymistBackend,
+  typstEditorExtensions,
+} from "./typstEditor";
 
 interface LspRangeLike {
   start: { line: number; character: number };
@@ -64,23 +52,40 @@ export class TypstView extends TextFileView {
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
   private cursorTimer: ReturnType<typeof setTimeout> | null = null;
   private semanticTimer: ReturnType<typeof setTimeout> | null = null;
-  private yoloTimer: ReturnType<typeof setTimeout> | null = null;
-  private yoloShim: YoloEditorShim | null = null;
   private semanticGeneration = 0;
+  /** Edits since the in-flight semantic-token request; its response is mapped through them. */
+  private semanticEdits: ChangeSet | null = null;
   private detachDiagListener: (() => void) | null = null;
-  private openedLspPath: string | null = null;
+  /** The server's copy of the open file. */
+  private lspFile: LspDocument;
+  /** Ephemeral state that arrived before the editor existed. */
+  private pendingEState: EditorEphemeralState | null = null;
 
   constructor(
     leaf: WorkspaceLeaf,
     private plugin: TinymistPlugin,
   ) {
     super(leaf);
+    this.lspFile = new LspDocument(() => this.plugin.lsp);
     this.detachDiagListener = plugin.onDiagnostics((uri) =>
       this.applyDiagnostics(uri),
     );
     this.addAction("eye", "Open preview", () => {
       void this.plugin.openPreview(this);
     });
+    // Obsidian's global hotkeys consume these keys before CodeMirror sees them.
+    // Mod-S (save) and Mod-F (showSearch below) keep their Obsidian meaning.
+    this.scope = new Scope(this.app.scope);
+    registerEditorScope(this.scope, () => this.editor, {
+      bold: ["*", "*"],
+      italic: ["_", "_"],
+      togglePreview: () => void this.plugin.togglePreview(this),
+    });
+    this.registerEvent(
+      this.app.workspace.on("css-change", () => {
+        if (this.editor) syncDarkTheme(this.editor);
+      }),
+    );
   }
 
   getViewType(): string {
@@ -95,51 +100,81 @@ export class TypstView extends TextFileView {
     return "sigma";
   }
 
+  /** The CodeMirror view, for plugin commands. */
+  get cm(): EditorView | null {
+    return this.editor;
+  }
+
   getViewData(): string {
     return this.editor ? this.editor.state.doc.toString() : this.data;
   }
 
   setViewData(data: string, clear: boolean): void {
-    this.data = data;
     if (!this.editor) {
+      this.contentEl.addClasses(["tym-editor-content", "lsp-cm-view"]);
       this.editor = new EditorView({
-        state: this.freshState(data),
+        state: this.stateFor(data),
         parent: this.contentEl,
       });
-      this.contentEl.addClass("tym-editor-content");
     } else if (clear) {
-      this.editor.setState(this.freshState(data));
-    } else if (data !== this.editor.state.doc.toString()) {
-      this.editor.dispatch({
-        changes: {
-          from: 0,
-          to: this.editor.state.doc.length,
-          insert: data,
-        },
-      });
+      this.dropSemanticRequest();
+      this.editor.setState(this.stateFor(data));
+    } else {
+      // A change from outside (another editor, git, a second pane): apply the
+      // difference so the cursor, scroll and undo history survive.
+      setDocText(this.editor, data);
     }
-    this.syncLspOpen(data);
+    if (clear && this.pendingEState) {
+      applyEphemeralState(this.editor, this.pendingEState);
+      this.pendingEState = null;
+    }
+    this.syncLspOpen();
+    if (clear) this.plugin.syncPinnedMain();
+  }
+
+  async onUnloadFile(file: TFile): Promise<void> {
+    if (this.editor) this.plugin.history.save(file.path, this.editor.state);
+    this.clearTimers();
+    await super.onUnloadFile(file);
+    this.lspFile.close();
+  }
+
+  async onRename(file: TFile): Promise<void> {
+    await super.onRename(file);
+    this.syncLspOpen();
   }
 
   clear(): void {
-    this.flushTimers();
-    if (this.openedLspPath) {
-      this.plugin.lsp?.didClose(this.openedLspPath);
-      this.openedLspPath = null;
-    }
+    this.clearTimers();
+    this.lspFile.close();
   }
 
   async onClose(): Promise<void> {
-    this.flushTimers();
-    if (this.openedLspPath) {
-      this.plugin.lsp?.didClose(this.openedLspPath);
-      this.openedLspPath = null;
-    }
+    this.clearTimers();
+    // FileView.onClose unloads the file: history cache, pending save, didClose.
+    await super.onClose();
     this.detachDiagListener?.();
     this.detachDiagListener = null;
     this.editor?.destroy();
     this.editor = null;
-    await super.onClose();
+  }
+
+  getEphemeralState(): Record<string, unknown> {
+    const state = super.getEphemeralState();
+    return this.editor ? { ...state, ...getEphemeralState(this.editor) } : state;
+  }
+
+  /** Cursor/scroll round trip and `{focus: true}` when Obsidian activates the leaf. */
+  setEphemeralState(state: unknown): void {
+    super.setEphemeralState(state);
+    if (!state || typeof state !== "object") return;
+    if (this.editor) applyEphemeralState(this.editor, state as EditorEphemeralState);
+    else this.pendingEState = state as EditorEphemeralState;
+  }
+
+  /** Obsidian's "Search current file" (Mod-F) calls this. */
+  showSearch(replace = false): void {
+    if (this.editor) showSearch(this.editor, replace);
   }
 
   /** Absolute filesystem path of the open file, or null. */
@@ -151,91 +186,56 @@ export class TypstView extends TextFileView {
 
   /** Re-announce the open buffer, e.g. after a language-server restart. */
   reannounce(): void {
-    this.openedLspPath = null;
-    if (this.editor) this.syncLspOpen(this.editor.state.doc.toString());
+    this.lspFile.reset();
+    this.syncLspOpen();
   }
 
-  private freshState(data: string): EditorState {
-    const extraExtensions = [];
-    if (this.plugin.settings.yoloTabCompletion) {
-      const yolo = getYoloPlugin(this.plugin.app);
-      const rendered = yolo ? yoloRenderExtension(yolo) : null;
-      if (rendered) extraExtensions.push(rendered);
-    }
-    return EditorState.create({
-      doc: data,
-      extensions: [
-        ...extraExtensions,
-        lineNumbers(),
-        history(),
-        drawSelection(),
-        highlightActiveLine(),
-        highlightSelectionMatches(),
-        bracketMatching(),
-        closeBrackets(),
-        EditorView.lineWrapping,
-        typstLanguage,
-        typstHighlightPlugin,
-        semanticTokensExtension,
-        lintGutter(),
-        autocompletion({
-          override: [
-            lspCompletionSource(
-              () => this.plugin.lsp,
-              () => this.absolutePath(),
-            ),
-          ],
-        }),
-        lspHoverTooltip(
+  /** Bring the server's copy of the file up to the editor (before a request). */
+  syncLsp(): void {
+    if (this.editor) this.syncLspDoc(this.editor.state.doc);
+  }
+
+  /** A state for `data`: the cached one when this file was open before (undo history). */
+  private stateFor(data: string): EditorState {
+    const extensions = typstEditorExtensions(
+      {
+        completion: tinymistBackend(
+          () => this.plugin.lsp,
+          () => this.absolutePath(),
+          (state) => this.syncLspDoc(state.doc),
+        ),
+        inline: () => this.plugin.yolo.inline,
+        yolo: this.plugin.yolo.extension(() => this.file?.name ?? null),
+        hover: lspHoverTooltip(
           this.plugin.app,
           () => this.plugin.lsp,
           () => this.absolutePath(),
         ),
-        keymap.of([
-          {
-            key: "F12",
-            run: () => {
-              void this.gotoDefinition();
-              return true;
-            },
-          },
-          ...closeBracketsKeymap,
-          ...defaultKeymap,
-          ...searchKeymap,
-          ...historyKeymap,
-          ...completionKeymap,
-          indentWithTab,
-        ]),
-        EditorView.domEventHandlers({
-          mousedown: (event, view) => {
-            if (!(event.metaKey || event.ctrlKey)) return false;
-            const pos = view.posAtCoords({
-              x: event.clientX,
-              y: event.clientY,
-            });
-            if (pos == null) return false;
-            view.dispatch({ selection: { anchor: pos } });
-            void this.gotoDefinition();
-            return true;
-          },
-        }),
-        EditorView.updateListener.of((update) => {
-          if (update.docChanged) this.onEdited();
-          if (update.selectionSet || update.docChanged) this.onCursorMoved();
-        }),
-      ],
-    });
+        renderInfo: markdownInfoRenderer(
+          this.plugin.app,
+          () => this.file?.path ?? null,
+        ),
+        onEdit: (_view, changes, startDoc) => this.onEdited(changes, startDoc),
+        onUpdate: (update) => this.onUpdate(update),
+        gotoDefinition: () => void this.gotoDefinition(),
+      },
+      data,
+    );
+    const key = this.file?.path;
+    return (
+      (key && this.plugin.history.restore(key, data, { extensions })) ||
+      EditorState.create({ doc: data, extensions })
+    );
   }
 
-  private onEdited(): void {
-    // Sync the buffer immediately: completion/hover requests race a debounce.
-    const path = this.absolutePath();
-    if (path && this.editor && this.plugin.lsp?.status === "running") {
-      this.plugin.lsp.didChange(path, this.editor.state.doc.toString());
-    }
+  /** A committed edit (never mid-composition): sync the server, save, re-highlight. */
+  private onEdited(changes: ChangeSet, startDoc: Text): void {
+    if (!this.editor) return;
+    this.syncLspDoc(this.editor.state.doc, { changes, startDoc });
     this.scheduleSemanticTokens();
-    this.scheduleYoloCompletion();
-
+    // Marks the view dirty, so Obsidian merges an external change into unsaved
+    // edits instead of dropping them; the short debounce below drives the preview.
+    this.requestSave();
     if (this.saveTimer) clearTimeout(this.saveTimer);
     this.saveTimer = setTimeout(() => {
       this.saveTimer = null;
@@ -244,6 +244,15 @@ export class TypstView extends TextFileView {
         if (path) this.plugin.lsp?.didSave(path);
       });
     }, this.plugin.settings.saveDebounceMs);
+  }
+
+  private onUpdate(update: ViewUpdate): void {
+    const edits = this.semanticEdits;
+    if (update.docChanged && edits) {
+      this.semanticEdits =
+        edits.newLength === update.changes.length ? edits.compose(update.changes) : null;
+    }
+    if (update.selectionSet || update.docChanged) this.onCursorMoved();
   }
 
   private onCursorMoved(): void {
@@ -297,6 +306,7 @@ export class TypstView extends TextFileView {
     const path = this.absolutePath();
     const lsp = this.plugin.lsp;
     if (!path || !this.editor || lsp?.status !== "running") return;
+    this.syncLsp();
     const pos = offsetToPos(
       this.editor.state.doc,
       this.editor.state.selection.main.head,
@@ -336,12 +346,16 @@ export class TypstView extends TextFileView {
     const path = this.absolutePath();
     const lsp = this.plugin.lsp;
     if (!path || !this.editor || lsp?.status !== "running") return;
+    this.syncLsp();
+    const requestDoc = this.editor.state.doc;
     let edits: unknown;
     try {
       edits = await lsp.formatting(path);
     } catch {
       return;
     }
+    // Edits for an older text would land in the wrong places.
+    if (this.editor?.state.doc !== requestDoc) return;
     if (Array.isArray(edits) && edits.length) {
       this.applyTextEdits(edits as LspTextEdit[]);
     }
@@ -352,13 +366,17 @@ export class TypstView extends TextFileView {
     this.semanticTimer = setTimeout(() => {
       this.semanticTimer = null;
       void this.fetchSemanticTokens();
-    }, 300);
+    }, 150);
   }
 
   private async fetchSemanticTokens(): Promise<void> {
     const path = this.absolutePath();
     const lsp = this.plugin.lsp;
-    if (!path || !this.editor || lsp?.status !== "running") return;
+    const editor = this.editor;
+    // A composition's text is not committed yet; its compositionend edit reschedules.
+    if (!path || !editor || lsp?.status !== "running" || editor.compositionStarted) {
+      return;
+    }
     const provider = (
       lsp.serverCapabilities as {
         semanticTokensProvider?: { legend?: SemanticLegend };
@@ -367,8 +385,10 @@ export class TypstView extends TextFileView {
     const legend = provider?.legend;
     if (!legend?.tokenTypes?.length) return;
 
+    this.syncLspDoc(editor.state.doc);
     const generation = ++this.semanticGeneration;
-    const requestDoc = this.editor.state.doc;
+    const requestDoc = editor.state.doc;
+    this.semanticEdits = ChangeSet.empty(requestDoc.length);
     let res: unknown;
     try {
       res = await lsp.semanticTokensFull(path);
@@ -376,74 +396,60 @@ export class TypstView extends TextFileView {
       return;
     }
     const data = (res as { data?: number[] } | null)?.data;
-    if (!data || !this.editor) return;
-    // Drop stale responses: a newer edit already rescheduled a fetch.
+    const edits = this.semanticEdits;
+    // A newer request, a file switch or a closed editor supersedes this one.
     if (
+      !data ||
+      !edits ||
       generation !== this.semanticGeneration ||
-      this.editor.state.doc !== requestDoc
+      this.editor !== editor
     ) {
       return;
     }
-    this.editor.dispatch({
+    this.semanticEdits = null;
+    // Typing during the round trip: map the tokens instead of dropping them, and
+    // let the baseline tokenizer draw the lines edited since the request.
+    const stale: StaleRange[] = [];
+    edits.iterChangedRanges((_fA, _tA, fromB, toB) => stale.push({ from: fromB, to: toB }));
+    editor.dispatch({
       effects: [
         setSemanticActive.of(true),
         setSemanticTokens.of(
-          decodeSemanticTokens(this.editor.state.doc, data, legend),
+          decodeSemanticTokens(requestDoc, data, legend).map(edits),
         ),
+        markSemanticStale.of(stale),
       ],
     });
   }
 
-  private scheduleYoloCompletion(): void {
-    if (!this.plugin.settings.yoloTabCompletion) return;
-    if (this.yoloTimer) clearTimeout(this.yoloTimer);
-    this.yoloTimer = setTimeout(() => {
-      this.yoloTimer = null;
-      const editor = this.editor;
-      const yolo = getYoloPlugin(this.plugin.app);
-      if (!editor || !yolo || !editor.hasFocus) return;
-      const selection = editor.state.selection.main;
-      if (!selection.empty) return;
-      if (!this.yoloShim || this.yoloShim.cm !== editor) {
-        this.yoloShim = new YoloEditorShim(editor);
-      }
-      try {
-        void yolo.getTabCompletionController().run(this.yoloShim, selection.head);
-      } catch (err) {
-        console.warn("[tinymist] YOLO completion failed:", err);
-      }
-    }, 600);
+  private dropSemanticRequest(): void {
+    this.semanticGeneration++;
+    this.semanticEdits = null;
   }
 
-  private flushTimers(): void {
-    if (this.yoloTimer) {
-      clearTimeout(this.yoloTimer);
-      this.yoloTimer = null;
+  private clearTimers(): void {
+    for (const timer of [this.cursorTimer, this.semanticTimer, this.saveTimer]) {
+      if (timer) clearTimeout(timer);
     }
-    if (this.cursorTimer) {
-      clearTimeout(this.cursorTimer);
-      this.cursorTimer = null;
-    }
-    if (this.semanticTimer) {
-      clearTimeout(this.semanticTimer);
-      this.semanticTimer = null;
-    }
-    if (this.saveTimer) {
-      clearTimeout(this.saveTimer);
-      this.saveTimer = null;
-      void this.save();
-    }
+    this.cursorTimer = this.semanticTimer = this.saveTimer = null;
+    this.dropSemanticRequest();
   }
 
-  private syncLspOpen(data: string): void {
+  private syncLspOpen(): void {
     const path = this.absolutePath();
-    if (!path || this.plugin.lsp?.status !== "running") return;
-    if (this.openedLspPath === path) return;
-    if (this.openedLspPath) this.plugin.lsp.didClose(this.openedLspPath);
-    this.openedLspPath = path;
-    this.plugin.lsp.didOpen(path, data);
-    this.applyDiagnostics(pathToUri(path));
-    this.scheduleSemanticTokens();
+    if (!path || !this.editor) return;
+    if (this.lspFile.open(path, this.editor.state.doc)) {
+      this.applyDiagnostics(pathToUri(path));
+      this.scheduleSemanticTokens();
+    }
+  }
+
+  private syncLspDoc(
+    doc: Text,
+    edit?: { changes: ChangeSet; startDoc: Text },
+  ): void {
+    // Mid-rename the old path is still open; onRename reopens it.
+    if (this.lspFile.path === this.absolutePath()) this.lspFile.sync(doc, edit);
   }
 
   private applyDiagnostics(uri: string): void {
