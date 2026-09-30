@@ -1,5 +1,15 @@
 # obsidian-tinymist roadmap
 
+## 2026-09-30 checkpoint
+
+The user considers the current Typst plugin sufficient for now; independent feature
+development stops at this checkpoint while LaTeX work continues. The shared focus
+race was repaired in the canonical live-preview core and copied identically to
+LaTeX Live. The full suite passed 279/279 without skips; shared browser checks passed
+31/31. The installed builds in all three existing vaults match this checkout.
+Actual Obsidian paper/math rendering and cursor SVG preview were checked. This does
+not claim that every remaining beta/manual or future-roadmap item was completed.
+
 The project goal is Tinymist-grade Typst editing inside Obsidian by being a
 thin Obsidian frontend for the real Tinymist language server, exactly like the
 VS Code / Neovim / Zed / Helix integrations. We do not reimplement the

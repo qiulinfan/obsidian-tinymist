@@ -52,6 +52,11 @@
   modules may only `import type` from `obsidian` (tests bundle them without
   Obsidian). `styles.css` embeds `src/editor/shared/editor.css` verbatim
   between the `shared:editor.css` markers; update both together.
+- The shared live input plugin reconciles actual DOM focus after updates in a
+  coalesced microtask, applying all `EditorView.focusChangeEffect` hooks together.
+  CodeMirror may discard a pending focus transaction after a render/selection
+  update; repairing only the live field leaves cursor preview unfocused. Defer
+  this during composition and retain both focus/blur race regressions.
 - Render hover (`renderHover`, `src/editor/shared/renderHover.ts`; its test
   `tests/renderHover.test.ts` is identical in both repositories) is
   `Prec.high`, so its section stays above the language server's and lint's
