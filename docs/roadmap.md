@@ -423,7 +423,11 @@ too. Built in phases that each end runnable and tested.
 - [ ] kgdistiller integration: recognize `#kn[...]` / `#ref[...]` authority
       markers, jump between marker and knowledge entry, surface graph
       neighbors in a side panel.
-- [ ] Mobile story: typst.ts WASM preview-only fallback.
+- [ ] Mobile story: feasibility studied 2026-09-29 (`docs/mobile-feasibility.md`):
+      typst.ts in a Worker renders and exports on device (Typst 0.15 build),
+      tinymist-web gives completion/hover but has no fonts or export yet;
+      first make the plugins load safely on mobile (no top-level Node
+      requires), then ship the editor layer, then typst.ts.
 - [ ] Math-notes ergonomics: snippet library, symbol picker.
 
 ## Non-goals
