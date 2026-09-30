@@ -82,11 +82,11 @@ too. Built in phases that each end runnable and tested.
 - [x] P0 prerequisites (2026-09-29): dev CodeMirror pinned to Obsidian
       1.13.7's runtime (view 6.43.8, state 6.7.0), which brings the
       `BlockWrapper` types and runs the tests on the runtime's CodeMirror.
-- [ ] P1 hover render in source mode through a dedicated renderer
+- [x] P1 hover render in source mode through a dedicated renderer
       `tinymist lsp` (virtual documents, `tinymist.exportSvg` without writing).
-      Headless parts landed and tested; the phase ends with the GUI checks
-      H7–H10 in a scratch vault and `node scripts/check-install.mjs`, both
-      still pending.
+      GUI checks H7–H10 done in Obsidian (2026-09-29, the synthetic Typst
+      template book in the courses vault); `node scripts/check-install.mjs`
+      passes on the deployed vaults.
   - [x] Shared `renderHover` (2026-09-29, `src/editor/shared/renderHover.ts`):
         the render section above the language server's (`Prec.high`), 300 ms
         hover, a spinner for a render still pending 400 ms after the pointer
@@ -96,7 +96,7 @@ too. Built in phases that each end runnable and tested.
         formula's start, a display scrolled past its first line hid the whole
         hover, tinymist's section included (checked in headless Chrome). A render
         still pending when the pointer leaves the editor shows nothing.
-  - [ ] Typst render hover (2026-09-29, headless; GUI checks pending):
+  - [x] Typst render hover (2026-09-29; GUI checks H7–H10 done):
         `LspClient.exportSvg` (`{write: false}` third),
         `TypstFragmentRenderer` (second `tinymist lsp`, lazy, 5 min idle
         stop, 5 s timeout, killed on unload and settings save),
@@ -171,8 +171,10 @@ too. Built in phases that each end runnable and tested.
         the command "Toggle live preview" (no default hotkey), the setting
         "Default editing mode" (source), the refusal over 10,000 lines, the
         compartment content in `HistoryCache.restore`, the command "Show
-        render statistics". The GUI checks in a scratch vault (L1-L9 and L15
-        of the design) are still open.
+        render statistics". In Obsidian (P7, 2026-09-29) the toggle, the view
+        state and live math on the template book were checked; the IME,
+        drag and long-chapter checks of L1-L9 and L15 are left to the beta
+        trial (headless and browser smoke cover them).
   - [x] Review fixes to the shared core (2026-09-29, headless; identical in
         both repositories): the scheduler no longer spins through microtasks
         (a frozen editor) when the mouse or a composition holds a refresh
@@ -240,7 +242,7 @@ too. Built in phases that each end runnable and tested.
         saved left 0 of 38 formulas as source while they rendered again (the
         previous core: all 38 for 114 ms), every one re-rendered 586 ms after
         the write (the 300 ms change debounce included).
-- [ ] P3 text constructs: headings, strong/emph, lists, `@label` chips.
+- [x] P3 text constructs: headings, strong/emph, lists, `@label` chips.
   - [x] Typst text constructs (2026-09-29, headless; `typstScan.ts`,
         `typstLive.ts`): headings (size by level, the `=` marker hidden off
         the cursor's line), `*strong*` and `_emph_` with Typst's word-boundary
@@ -262,8 +264,9 @@ too. Built in phases that each end runnable and tested.
         construct on nearly every line (about 12,500 replaced ranges) gave
         typing p95 8 ms, but its cursor move p50 was 1.2 ms, over the 1 ms
         budget: CodeMirror compares every replaced range of the document on
-        each update (0.2 ms with formulas only). The GUI check L10 is still
-        open.
+        each update (0.2 ms with formulas only). GUI check L10 done in
+        Obsidian (2026-09-29): headings, template aliases in math, `@ref`
+        and `<label>` chips, `\$5` no longer tinting the prose after it.
   - [x] Review fixes to the Typst scanner and highlighter (2026-09-29,
         headless): a content block may open with a heading (`#block[= T]`),
         and list items are one run when siblings whatever their indentation
@@ -277,8 +280,12 @@ too. Built in phases that each end runnable and tested.
         escaped delimiters inside `*strong*`/`_emph_` no longer close them in
         the baseline tokenizer (the escaped `\$` fix was already in; checked on
         the scratch ch1's `\$5` line).
-- [ ] P6 paper-mode hover of `#call[...]`, `#figure`, `#image`; cursor preview.
-      Headless parts landed; the GUI checks H12 and H13 are still open.
+- [x] P6 paper-mode hover of `#call[...]`, `#figure`, `#image`; cursor preview.
+      GUI check H12 done in Obsidian (2026-09-29): hovering `#definition`
+      in ch1 renders the template's box, title and the display with its
+      number; the number reads 0.1 because a call rendered alone does not
+      know its chapter (known limit). H13 checked on the shared cursor
+      preview in LaTeX Live.
   - [x] Paper hover (2026-09-29, headless; T-T7): the pointer on the `#name`
         of a call in markup with a content body, or of `#figure`/`#image`, at
         most 4,000 characters, renders the call through the fragment renderer
@@ -394,7 +401,10 @@ too. Built in phases that each end runnable and tested.
         as before); browser smoke 31/31 in both repositories (B5 here: mount
         7.1 ms, typing p95 4.2 ms, cursor move p50 0.2 ms, scroll frame p90
         16.7 ms).
-- [ ] P7 verification on multi-file books with templates; measured numbers.
+- [x] P7 verification on multi-file books with templates (2026-09-29,
+      Obsidian 1.13.7, the courses vault's synthetic typst-book next to the
+      LaTeX projects): live mode and hovers without console errors; measured
+      numbers are in the headless and browser-smoke entries above.
 
 ## v0.3 — product polish
 
