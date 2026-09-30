@@ -281,6 +281,54 @@ test("render hover: the formula under the pointer through the plugin's TypstRend
   }
 });
 
+test("cursor preview and paper hover through the view: the settings, and the invert setting in a dark theme", async () => {
+  const typstRender = new TypstRender(
+    {
+      async render(_dir, source) {
+        const w = source.includes("#set page(width: 400pt") ? 400 : 10;
+        return `<svg viewBox="0 0 ${w} 12" width="${w}pt" height="12pt" xmlns="http://www.w3.org/2000/svg"><path fill="#0a0b0c" d="M 0 0"/></svg>`;
+      },
+    },
+    "/vault",
+  );
+  const settings = { saveDebounceMs: 100000, hoverRender: true, cursorPreview: false, invertPreviewColors: "never" };
+  const { view, vault } = typstView(100000, { settings, typstRender });
+  vault.files.set("a.typ", "Intro $x^2$ here\n#block[boxed]\n");
+  await view.loadFile(new TFile("a.typ") as never);
+  const cm = view.cm!;
+  const preview = () => cm.dom.querySelector(".cm-tooltip.lsp-cursor-preview:not(.is-empty) .tym-fragment svg");
+  const hoverAt = async (pos: number) => {
+    cm.dispatch({ effects: closeHoverTooltips });
+    Object.assign(cm, { posAtCoords: () => pos, coordsAtPos: () => ({ left: 10, right: 12, top: 0, bottom: 10 }) });
+    cm.contentDOM.querySelector(".cm-line")!.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, clientX: 11, clientY: 5 }));
+    await sleep(380);
+    return cm.dom.querySelector<HTMLElement>(".cm-tooltip-hover .lsp-render-hover .lsp-lp-paper");
+  };
+  try {
+    cm.focus();
+    await sleep(40);
+    cm.dispatch({ selection: { anchor: 8 } });
+    await sleep(10);
+    assert.equal(preview(), null, "off by default");
+    settings.cursorPreview = true;
+    cm.dispatch({ selection: { anchor: 9 } });
+    await sleep(10);
+    assert.ok(preview(), "on: the formula at the cursor");
+
+    const block = "Intro $x^2$ here\n".length + 2;
+    const paper = await hoverAt(block);
+    assert.ok(paper && !paper.classList.contains("is-inverted"), "a page, not inverted");
+    settings.invertPreviewColors = "auto";
+    assert.ok(!(await hoverAt(block))!.classList.contains("is-inverted"), "auto, light theme");
+    document.body.classList.add("theme-dark");
+    assert.ok((await hoverAt(block))!.classList.contains("is-inverted"), "auto, dark theme");
+  } finally {
+    document.body.classList.remove("theme-dark");
+    await view.onClose();
+    typstRender.dispose();
+  }
+});
+
 test("tinymist's hover: closed by typing; in a rendered formula, not a symbol's sampled values", async () => {
   const typstRender = new TypstRender(
     {

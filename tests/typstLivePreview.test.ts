@@ -17,10 +17,10 @@ import { EditorView } from "@codemirror/view";
 import { setTypingDiagnostics } from "../src/editor/shared/editorKit";
 import { isLive, livePreview, livePreviewCompartment, refreshLive, renderStats } from "../src/editor/shared/livePreview";
 import { typstEditorExtensions, typstMathSpans } from "../src/editor/typstEditor";
-import { chapterPreamble, hash, topLevelStatements } from "../src/editor/typstFragment";
+import { chapterPreamble, hash, topLevelStatements, typstMathAt } from "../src/editor/typstFragment";
 import { typstLiveLanguage } from "../src/editor/typstLive";
 import { FragmentBackend, TypstLiveRenderer, TypstRender } from "../src/editor/typstRender";
-import { TypstConstruct, TypstMath, scanTypst, scanTypstText } from "../src/editor/typstScan";
+import { TypstConstruct, TypstMath, scanTypst, scanTypstText, typstCallAt } from "../src/editor/typstScan";
 import { FragmentError, TypstFragmentRenderer } from "../src/lsp/fragmentRenderer";
 import { press } from "./support/keyMatrix";
 
@@ -112,6 +112,18 @@ test("T-T5 scan: formulas in markup only; display by whitespace; a display formu
     assert.ok(k >= 0 && spans[k + 1] === c.mathTo - 1, `${c.body} is a span`);
   }
   assert.equal(scanTypst(doc), scanTypst(doc), "memoized per Text");
+});
+
+test("T-T5 scan: a `#\"$\"` string opens no formula, for typstMathSpans (the hover, the cursor preview) as for the scan", () => {
+  const s = ['见 #"$" 与 $t$。', 'next $n$ line #box[#"$"] and $v$.', 'C# "quoted $w$" is markup'].join("\n");
+  const doc = Text.of(s.split("\n"));
+  const spans = typstMathSpans(doc);
+  const bodies: string[] = [];
+  for (let k = 0; k < spans.length; k += 2) bodies.push(doc.sliceString(spans[k] - 1, spans[k + 1] + 1));
+  assert.deepEqual(bodies, ["$t$", "$n$", "$v$", "$w$"]);
+  assert.deepEqual(formulas(scanTypst(doc)).map((c) => c.body), bodies);
+  assert.equal(typstMathAt(doc, s.indexOf("$t$") + 1)?.body, "$t$");
+  assert.equal(typstMathAt(doc, s.indexOf("与")), null);
 });
 
 test("T-T5 scan: each formula carries the hash of the statements above it, as the renderer's preamble has them", () => {
@@ -699,6 +711,78 @@ test("T-T6 scan: headings, strong/emph, lists, references and labels, as Typst p
 const lineTexts = (view: EditorView) => [...view.contentDOM.querySelectorAll(".cm-line")].map((l) => l.textContent);
 const shownIn = (view: EditorView, selector: string) =>
   [...view.contentDOM.querySelectorAll<HTMLElement>(selector)].map((el) => el.textContent);
+
+test("scan: calls in markup for the paper hover (a content body, #figure, #image; at most 4,000 characters)", () => {
+  const s = [
+    '#let thm(body) = block[#body]',
+    '#show: thm',
+    "#theorem(title: [T])[",
+    "  Body $x$ with #figure(image(\"a.png\"), caption: [#emph[c]]) inside.",
+    "]",
+    "#h(1em) #box[b] #thm.with(x: 1)[w] #image(\"b.png\") #f(1)",
+    "$#box[m]$ `#raw[r]` // #comment[c]",
+    "#if true [#strong[k]] #{ box[code] }",
+    `#box[${"x".repeat(4000)}]`,
+    "#strong[open",
+  ].join("\n");
+  const doc = Text.of(s.split("\n"));
+  const at = (needle: string, offset = 1) => {
+    const c = typstCallAt(doc, s.indexOf(needle) + offset);
+    return c && `${c.name}${c.content ? "[]" : ""}: ${s.slice(c.from, c.nameTo)}`;
+  };
+  assert.equal(at("#theorem", 0), "theorem[]: #theorem", "at its #");
+  assert.equal(at("#theorem", 8), "theorem[]: #theorem", "at the end of its name");
+  assert.equal(at("#theorem", 9), null, "its arguments are not its name");
+  assert.equal(at("#figure"), "figure: #figure", "inside a content block");
+  assert.equal(at("#emph"), null, "in an argument: code, not markup");
+  assert.equal(at("#box[b]"), "box[]: #box");
+  assert.equal(at("#thm.with"), "thm.with[]: #thm.with");
+  assert.equal(at("#image(\"b"), "image: #image");
+  assert.equal(at("#h(1em)"), null, "no content body");
+  assert.equal(at("#f(1)"), null);
+  assert.equal(at("#let"), null, "a statement");
+  assert.equal(at("#show"), null);
+  assert.equal(at("#box[m]"), null, "in math");
+  assert.equal(at("#raw"), null, "in raw text");
+  assert.equal(at("#comment"), null, "in a comment");
+  assert.equal(at("#strong[k]"), null, "in a keyword expression");
+  assert.equal(at("box[code]", 0), null, "in a code block");
+  assert.equal(at("#box[xx"), null, "past 4,000 characters");
+  assert.equal(at("#strong[open"), null, "unclosed");
+  const theorem = typstCallAt(doc, s.indexOf("#theorem"))!;
+  assert.equal(s.slice(theorem.from, theorem.to), s.slice(s.indexOf("#theorem"), s.indexOf("]\n#h") + 1));
+});
+
+test("scan: nesting deeper than the scanner looks into stays source, and never overflows the stack", () => {
+  const depth = 20000;
+  const deep = `${"#[".repeat(depth)}$deep$${"]".repeat(depth)}`;
+  const s = ["#let a = 1", "#[#[#[$shallow$]]]", deep, "$after$", `*${"_*".repeat(3000)}x*`].join("\n");
+  const found = formulas(scanTypstText(s)).map((c) => c.body);
+  assert.deepEqual(found, ["$shallow$", "$after$"], "the formula 20,000 blocks down stays source");
+  assert.deepEqual(topLevelStatements(s).map((t) => t.text), ["#let a = 1"]);
+  const doc = Text.of(s.split("\n"));
+  assert.equal(typstMathAt(doc, s.indexOf("$after$") + 1)?.body, "$after$");
+  assert.equal(typstCallAt(doc, s.indexOf("#[#[#[$sh")), null);
+});
+
+test("scan: unclosed content blocks on many lines scan in linear time", () => {
+  // Each unclosed `#box[` ends at its line; unmemoized, the ones below were scanned again for
+  // each one above (2^18 times the last here: seconds; now a few ms).
+  const open = Array.from({ length: 18 }, (_, i) => `第 ${i} 行文字 #box[ 未闭合的内容块 $x_${i}$ 以及更多文字。`);
+  const s = ["#let a = 1", ...open, ...Array.from({ length: 200 }, (_, i) => `正常的一行 ${i}，公式 $y_${i}$。`), "$after$"].join("\n");
+  const t0 = performance.now();
+  const found = formulas(scanTypstText(s)).map((c) => c.body);
+  const statements = topLevelStatements(s).map((t) => t.text);
+  const ms = performance.now() - t0;
+  assert.equal(found.length, 201, "the formulas after the unclosed lines render");
+  assert.equal(found.at(-1), "$after$");
+  assert.deepEqual(statements, ["#let a = 1"]);
+  assert.ok(ms < 1000, `scanned in ${ms.toFixed(0)} ms`);
+  // An unclosed group inside a closed one ends at its line, as in Typst (the `]` closes it).
+  const t = "#theorem[\n  Let #f(a, b\n] and $z$";
+  assert.deepEqual(formulas(scanTypstText(t)).map((c) => c.body), ["$z$"]);
+  assert.equal(typstCallAt(Text.of(t.split("\n")), 1)?.to, t.indexOf("] and") + 1);
+});
 
 test("T-T6 live: text constructs are styled with their markup hidden, which shows where the cursor is", async () => {
   const s = [

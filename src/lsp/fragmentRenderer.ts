@@ -8,6 +8,13 @@ import { LspClient } from "./client";
  */
 export const FRAGMENT_DOC = ".obsidian-tinymist-fragment.typ";
 
+/**
+ * The ink of the mark a fragment draws on its page (a 0.1pt square: an inline formula's
+ * baseline marker, a paper page's foreground). A kept document template may add pages
+ * before the fragment or after it: the fragment's page is the one holding the mark.
+ */
+export const FRAGMENT_MARK = "#010203";
+
 /** A fragment Typst rejects: the same source fails the same way, so it may be cached. */
 export class FragmentError extends Error {
   constructor(
@@ -69,7 +76,7 @@ export class TypstFragmentRenderer {
   }
 
   /**
-   * The first page of `source` compiled as the virtual document of folder `dir`, as SVG
+   * The fragment's page of `source` compiled as the virtual document of folder `dir`, as SVG
    * text. Rejects with a FragmentError carrying Typst's message when the source fails,
    * with a plain Error when rendering is not possible (no binary, a timeout, a crash).
    */
@@ -152,11 +159,12 @@ export class TypstFragmentRenderer {
         if (this.client === lsp) this.shutdown();
         throw this.tooLong();
       }
-      const items = res?.items ?? [];
-      // A kept document template may put pages before it: the fragment ends the document.
-      const data = items[items.length - 1]?.data;
-      if (!data) throw new Error("tinymist returned no SVG");
-      return Buffer.from(data, "base64").toString("utf8");
+      const pages = (res?.items ?? []).map((item) => (item.data ? Buffer.from(item.data, "base64").toString("utf8") : ""));
+      // A kept document template may add pages before the fragment or after it: the last
+      // page holding its mark (FRAGMENT_MARK), else the last page (display math has none).
+      const svg = pages.filter((page) => page.includes(`fill="${FRAGMENT_MARK}"`)).at(-1) ?? pages.at(-1);
+      if (!svg) throw new Error("tinymist returned no SVG");
+      return svg;
     } finally {
       this.inFlight--;
       this.armIdle();

@@ -26,6 +26,8 @@
   set document(title: title)
   set heading(numbering: "1.1")
   set math.equation(numbering: "(1)", supplement: none)
+  // Captions in the book's colour: only the document template applies it.
+  show figure.caption: set text(fill: rgb("#6b2fa3"))
   page(numbering: none)[#align(center, text(size: 20pt, title))]
   body
 }

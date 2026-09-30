@@ -289,8 +289,12 @@ export function lspContentChanges(changes: ChangeSet, startDoc: Text): LspConten
 
 const spanCache = new WeakMap<Text, number[]>();
 
-/** A `"` that opens a code string (not a markup quote): after `( , : = { +` or import/include. */
+/**
+ * A `"` that opens a code string (not a markup quote): right after `#` (`#"$"`), or after
+ * `( , : = { +` or import/include.
+ */
 function codeQuote(s: string, i: number): boolean {
+  if (s[i - 1] === "#") return true;
   let j = i - 1;
   while (j >= 0 && (s[j] === " " || s[j] === "\t")) j--;
   if (j >= 0 && "(,:={+".includes(s[j])) return true;

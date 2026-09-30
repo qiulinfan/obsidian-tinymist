@@ -1,6 +1,7 @@
 import { Text } from "@codemirror/state";
-import { existsSync, readFileSync } from "fs";
+import { existsSync, readFileSync, statSync } from "fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "path";
+import { FRAGMENT_MARK } from "../lsp/fragmentRenderer";
 import { bookMain } from "../preview/previewEntry";
 import type { HoverTarget } from "./shared/renderHover";
 import { typstMathSpans } from "./typstEditor";
@@ -8,7 +9,8 @@ import { typstMathSpans } from "./typstEditor";
 // Typst fragments: a formula compiled on its own with the definitions it needs. The
 // preamble repeats the book main's statements before its include of the chapter (or a
 // `.tinymist-fragment.typ` above the file) and the chapter's own statements before the
-// formula; a frame then crops the page to the ink and marks the baseline.
+// formula; a frame then crops the page to the ink and marks the baseline. A call's paper
+// render keeps the document template rules too (the book's look) on a page of its own.
 
 /** A project file whose statements replace the book main's in fragment preambles. */
 export const FRAGMENT_PREAMBLE = ".tinymist-fragment.typ";
@@ -18,8 +20,8 @@ export const FRAGMENT_PT = 16;
 
 /** Text colour of the frame, replaced by currentColor so renders follow the theme. */
 const INK = "#0a0b0c";
-/** Colour of the baseline marker, a 0.1pt square Typst draws first. */
-const MARK = "#010203";
+/** Colour of the baseline marker, a 0.1pt square Typst draws first (the fragment's mark). */
+const MARK = FRAGMENT_MARK;
 
 const FRAME = [
   "#set page(width: auto, height: auto, margin: 0pt, fill: none, header: none, footer: none, background: none, foreground: none, numbering: none)",
@@ -29,6 +31,39 @@ const FRAME = [
 ].join("\n");
 
 const MARKER = `#box(width: 0pt, height: 0pt, place(rect(width: 0.1pt, height: 0.1pt, fill: rgb("${MARK}"))))`;
+
+/** The page width a call's paper render compiles at (`#theorem[…]`, `#figure(…)`). */
+export const PAPER_WIDTH_PT = 400;
+/**
+ * Points per em of a paper render: 12pt shows at the editor's text size (16px), so the
+ * page is as large as a PDF at 100%.
+ */
+export const PAPER_PT = 12;
+
+/**
+ * The most bytes of image files a call may name for its paper render. A page embeds its
+ * images: on the scratch typst-book a 9 MB PNG took 0.2 s to render and 0.3 s to show, a
+ * 25 MB one 3.5 s and 1.2 s, and one past 50 MB passed the render timeout, which stops the
+ * renderer live views use.
+ */
+export const PAPER_MAX_IMAGE_BYTES = 10 * 2 ** 20;
+
+/** Colour of a reference a paper render cannot resolve (link-like, as live preview's chips). */
+const REF_INK = "#2a5db0";
+
+/**
+ * A page of fixed width, as tall as the call, white, without the template's chrome, marked
+ * (the fragment's mark in its foreground: a kept template may add pages before or after
+ * it). A call rendered alone cannot resolve what lies outside it (another chapter's label,
+ * a heading numbered outside it, a bibliography entry): such references and citations show
+ * as `@key` and `[key]` instead of failing the page.
+ */
+const PAPER_FRAME = [
+  `#set page(width: ${PAPER_WIDTH_PT}pt, height: auto, margin: 6pt, fill: white, header: none, footer: none, ` +
+    `background: none, foreground: place(rect(width: 0.1pt, height: 0.1pt, fill: rgb("${MARK}"))), numbering: none)`,
+  `#show ref: it => if it.element == none or it.element.at("numbering", default: none) == none { text(fill: rgb("${REF_INK}"))[\\@#str(it.target)] } else { it }`,
+  `#show cite: it => text(fill: rgb("${REF_INK}"))[\\[#str(it.key)\\]]`,
+].join("\n");
 
 // ---- Top-level statements ------------------------------------------------------------
 
@@ -89,11 +124,39 @@ function skipString(s: string, i: number): number {
 }
 
 /**
+ * Embedded expressions (`#…` in content or math) the group skips look into, nested: deeper
+ * ones (only ever pathological) are passed over as text, so the recursion through
+ * skipGroup and skipEmbedded never overflows the stack (the brackets still pair).
+ */
+const MAX_NESTING = 100;
+
+/**
+ * skipGroup's results in the text it last scanned, by where the group opens. An unclosed
+ * group falls back to its line's end (skipEmbedded, codeLineEnd), so the group around it
+ * goes on and meets the next unclosed one again: unmemoized, each was scanned once per
+ * unclosed group around it, and a dozen unclosed `#box[` lines took seconds (twice as
+ * long with each one more). `depth` is not in the key: it only changes a result past
+ * MAX_NESTING levels, where brackets still pair the same way.
+ */
+let endsOf = "";
+const groupEnds = new Map<number, number>();
+
+/**
  * After the group `(…)`, `{…}`, `[…]` or `$…$` opening at `i`, or -1 when it is not
  * closed. Code groups skip strings and comments; content and math skip escapes and
- * embedded `#` expressions; any of them nests the others.
+ * embedded `#` expressions; any of them nests the others. `depth` counts the embedded
+ * expressions it lies in.
  */
-export function skipGroup(s: string, i: number): number {
+export function skipGroup(s: string, i: number, depth = 0): number {
+  if (s !== endsOf) groupEnds.clear();
+  // Also when equal: the next comparisons then find the same string, not equal text.
+  endsOf = s;
+  let end = groupEnds.get(i);
+  if (end === undefined) groupEnds.set(i, (end = groupEnd(s, i, depth)));
+  return end;
+}
+
+function groupEnd(s: string, i: number, depth: number): number {
   const stack = [s[i]];
   i++;
   while (i < s.length) {
@@ -108,7 +171,7 @@ export function skipGroup(s: string, i: number): number {
     }
     if (mode === "[" || mode === "$") {
       if (c === "\\") i += 2;
-      else if (c === "#") i = Math.max(skipEmbedded(s, i + 1, mode === "$"), i + 1);
+      else if (c === "#" && depth < MAX_NESTING) i = Math.max(skipEmbedded(s, i + 1, mode === "$", depth + 1), i + 1);
       else if (mode === "$" && c === '"') i = skipString(s, i);
       else if (c === "$" && mode === "$") {
         stack.pop();
@@ -138,7 +201,7 @@ export function skipGroup(s: string, i: number): number {
  * After a code line from `i`: the newline or `;` at depth 0, a line comment, or a closer
  * of the enclosing group (`#if a [b]]` inside a content block, `$` in math).
  */
-function codeLineEnd(s: string, i: number, inMath = false): number {
+function codeLineEnd(s: string, i: number, inMath = false, depth = 0): number {
   while (i < s.length) {
     const c = s[i];
     if (c === "\n" || c === "]" || c === ")" || c === "}" || (inMath && c === "$")) return i;
@@ -148,7 +211,7 @@ function codeLineEnd(s: string, i: number, inMath = false): number {
     if (t >= 0) i = t;
     else if (c === '"') i = skipString(s, i);
     else if ("([{$".includes(c)) {
-      const end = skipGroup(s, i);
+      const end = skipGroup(s, i, depth);
       // An unclosed group (typing in progress) ends the statement at its line.
       if (end < 0) return lineEnd(s, i);
       i = end;
@@ -159,13 +222,13 @@ function codeLineEnd(s: string, i: number, inMath = false): number {
 
 /**
  * After the embedded expression right after a `#` at `i - 1` (`#f(x)[y].z`,
- * `#(a, b).map(f)`, `#if …`); `inMath` when that `#` is in math.
+ * `#(a, b).map(f)`, `#if …`); `inMath` when that `#` is in math, `depth` as for skipGroup.
  */
-export function skipEmbedded(s: string, i: number, inMath = false): number {
+export function skipEmbedded(s: string, i: number, inMath = false, depth = 0): number {
   const c = s[i];
   let j: number;
   if (c === "(" || c === "[" || c === "{") {
-    j = skipGroup(s, i);
+    j = skipGroup(s, i, depth);
     if (j < 0) return lineEnd(s, i);
   } else if (c === '"') {
     j = skipString(s, i);
@@ -173,13 +236,13 @@ export function skipEmbedded(s: string, i: number, inMath = false): number {
     IDENT.lastIndex = i;
     const id = IDENT.exec(s);
     if (!id) return i;
-    if (LINE_KEYWORDS.has(id[0])) return codeLineEnd(s, i + id[0].length, inMath);
+    if (LINE_KEYWORDS.has(id[0])) return codeLineEnd(s, i + id[0].length, inMath, depth);
     j = i + id[0].length;
   }
   // Calls, content arguments and fields chain onto any of them, as in Typst.
   for (;;) {
     if (s[j] === "(" || s[j] === "[") {
-      const end = skipGroup(s, j);
+      const end = skipGroup(s, j, depth);
       if (end < 0) return lineEnd(s, j);
       j = end;
       continue;
@@ -342,11 +405,11 @@ export interface PreambleStatement {
 /**
  * The project part of a fragment preamble, read from disk: the statements of the nearest
  * `.tinymist-fragment.typ` (all but `#include`), else those of the book main that
- * includes the file (see bookMain) before that include, without `#include` and bare
- * `#show:` rules. Relative import and file paths (`image`, `read`, `yaml`, …) become
- * root-absolute.
+ * includes the file (see bookMain) before that include, without `#include` and, unless
+ * `templates` (a paper render: the book's look), bare `#show:` rules. Relative import and
+ * file paths (`image`, `read`, `yaml`, …) become root-absolute.
  */
-export function projectStatements(filePath: string, root: string): PreambleStatement[] {
+export function projectStatements(filePath: string, root: string, templates = false): PreambleStatement[] {
   const override = fragmentOverride(filePath, root);
   if (override) {
     const text = readText(override);
@@ -366,11 +429,30 @@ export function projectStatements(filePath: string, root: string): PreambleState
     if (s.kind === "include") {
       const path = /^#include\s+"([^"\n]+)"/.exec(s.text)?.[1];
       if (path && resolve(path.startsWith("/") ? root : dir, path.replace(/^\/+/, "")) === source) break;
-    } else if (!templateRule(s)) {
+    } else if (templates || !templateRule(s)) {
       out.push({ text: rootAbsolute(s, dir, root), file: main, line: lineAt(s.from) });
     }
   }
   return out;
+}
+
+/** The literal path of an `image("…")` call (not a package's). */
+const IMAGE_PATH = /(?<![\w.-])image\(\s*"([^"@\n][^"\n]*)"/g;
+
+/**
+ * The size in bytes of the image files `call`, written in folder `dir`, names as literal
+ * paths (`image("…")`; `/…` from the vault root).
+ */
+export function imageBytes(call: string, dir: string, root: string): number {
+  let bytes = 0;
+  for (const [, path] of call.matchAll(IMAGE_PATH)) {
+    try {
+      bytes += statSync(path.startsWith("/") ? join(root, path) : resolve(dir, path)).size;
+    } catch {
+      // A file that cannot be read fails the render with Typst's own error.
+    }
+  }
+  return bytes;
 }
 
 /** A quoted path of a .typ file (`#import "x.typ"`, `read("y.typ")`), not a package's. */
@@ -396,12 +478,19 @@ export function projectPreamble(filePath: string, root: string): string {
     .join("\n");
 }
 
-/** The chapter part: the file's own statements that end before `offset` (the buffer's). */
-export function chapterStatements(statements: readonly TopLevelStatement[], offset: number): TopLevelStatement[] {
+/**
+ * The chapter part: the file's own statements that end before `offset` (the buffer's), bare
+ * `#show:` rules only with `templates` (a paper render).
+ */
+export function chapterStatements(
+  statements: readonly TopLevelStatement[],
+  offset: number,
+  templates = false,
+): TopLevelStatement[] {
   const out: TopLevelStatement[] = [];
   for (const s of statements) {
     if (s.to > offset) break;
-    if (inChapterPreamble(s)) out.push(s);
+    if (templates ? s.kind !== "include" : inChapterPreamble(s)) out.push(s);
   }
   return out;
 }
@@ -498,7 +587,7 @@ export function typstMathAt(doc: Text, pos: number): MathFragment | null {
  * `let` binding: `#rates.map(((k, r)) => [$#r$])`), or it needs a context that a
  * `context` there provides. The document compiles; only the fragment cannot.
  */
-export function needsEnclosingCode(doc: Text, m: MathFragment, message: string): boolean {
+export function needsEnclosingCode(doc: Text, m: { from: number; to: number }, message: string): boolean {
   const name =
     /^unknown variable: ([\p{L}\p{N}_-]+)/u.exec(message)?.[1] ??
     (/^can only be used when context is known/.test(message) ? "context" : null);
@@ -517,6 +606,16 @@ export function fragmentSource(preamble: string, math: { body: string; display: 
   return `${preamble ? `${preamble}\n` : ""}${FRAME}\n${math.display ? "" : MARKER}${math.body}\n`;
 }
 
+/**
+ * The document compiled for a call's paper render: the preamble (the book's own styles
+ * apply, its document template's too when kept), a white page PAPER_WIDTH_PT wide and as
+ * tall as the call, marked (references it cannot resolve shown as their keys), then the
+ * call.
+ */
+export function paperSource(preamble: string, call: string): string {
+  return `${preamble ? `${preamble}\n` : ""}${PAPER_FRAME}\n${call}\n`;
+}
+
 export interface FragmentSvg {
   /** The SVG without the marker, the ink as currentColor, every id prefixed. */
   svg: string;
@@ -529,15 +628,16 @@ export interface FragmentSvg {
 
 /**
  * Post-process a fragment page: read its size and the marker's baseline, strip the
- * marker, turn the ink into currentColor (glyphs, fraction bars and rules follow the
- * theme; explicit colours stay), and prefix ids and their references with `idPrefix`
- * (several renders share one document). Null when it is not Typst's SVG.
+ * marker (and a paper page's mark), turn the ink into currentColor (glyphs, fraction bars
+ * and rules follow the theme; explicit colours stay), and prefix ids and their references
+ * with `idPrefix` (several renders share one document). Null when it is not Typst's SVG.
  */
 export function readSvg(svg: string, idPrefix: string): FragmentSvg | null {
   const size = /^<svg\b[^>]*?\swidth="([\d.]+)pt"\s+height="([\d.]+)pt"/.exec(svg);
   if (!size) return null;
   const marker = new RegExp(`<g transform="translate\\(([-\\d.e]+) ([-\\d.e]+)\\)"><path fill="${MARK}"[^>]*/></g>`).exec(svg);
   const out = (marker ? svg.replace(marker[0], "") : svg)
+    .replace(new RegExp(`<path fill="${MARK}"[^>]*/>`, "g"), "")
     .replace(new RegExp(`\\b(fill|stroke)="${INK}"`, "g"), '$1="currentColor"')
     .replace(/\bid="([^"]+)"/g, `id="${idPrefix}$1"`)
     .replace(/href="#([^"]+)"/g, `href="#${idPrefix}$1"`)

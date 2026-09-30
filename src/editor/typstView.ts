@@ -43,7 +43,7 @@ import {
 } from "./typstEditor";
 import { typstMathAt } from "./typstFragment";
 import { typstLiveLanguage } from "./typstLive";
-import { TypstLiveRenderer, typstRenderHover } from "./typstRender";
+import { TypstLiveRenderer, TypstRenderHost, typstCursorPreview, typstRenderHover } from "./typstRender";
 
 interface LspRangeLike {
   start: { line: number; character: number };
@@ -203,7 +203,7 @@ export class TypstView extends TextFileView {
     const s = renderStats(this.editor);
     return (
       `${s.renders} renders (p50 ${s.p50} ms, p95 ${s.p95} ms), ${s.pending} pending; ` +
-      `cache ${s.hits} hits, ${s.misses} misses; ` +
+      `cache ${s.cached} held, ${s.hits} hits, ${s.misses} misses; ` +
       `${s.builds} decoration builds (p50 ${s.buildP50} ms, p95 ${s.buildP95} ms)`
     );
   }
@@ -336,13 +336,11 @@ export class TypstView extends TextFileView {
           ),
           inline: () => this.plugin.yolo.inline,
           yolo: this.plugin.yolo.extension(() => this.file?.name ?? null),
-          // The formula's render first, then tinymist's text hover (signatures of aliases).
+          // The formula's (or a call's page) render first, then tinymist's text hover
+          // (signatures of aliases); the cursor preview floats below the formula being typed.
           hover: [
-            typstRenderHover({
-              renderer: () => this.plugin.typstRender,
-              path: () => this.absolutePath(),
-              enabled: () => this.plugin.settings.hoverRender,
-            }),
+            typstRenderHover(this.renderHost(() => this.plugin.settings.hoverRender)),
+            typstCursorPreview(this.renderHost(() => this.plugin.settings.cursorPreview)),
             lspHoverTooltip(
               this.plugin.app,
               () => this.plugin.lsp,
@@ -378,6 +376,20 @@ export class TypstView extends TextFileView {
       (key && this.plugin.history.restore(key, data, { extensions })) ||
       EditorState.create({ doc: data, extensions })
     );
+  }
+
+  /**
+   * The render hover's and cursor preview's view of this file, gated by `enabled`. Paper
+   * renders invert as the preview does: with "Invert preview colors" auto, in a dark theme.
+   */
+  private renderHost(enabled: () => boolean): TypstRenderHost {
+    return {
+      renderer: () => this.plugin.typstRender,
+      path: () => this.absolutePath(),
+      enabled,
+      inverted: () =>
+        this.plugin.settings.invertPreviewColors === "auto" && this.contentEl.ownerDocument.body.classList.contains("theme-dark"),
+    };
   }
 
   /**

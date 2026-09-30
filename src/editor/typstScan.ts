@@ -1,4 +1,5 @@
 import { Text } from "@codemirror/state";
+import { inWord } from "./highlightPlugin";
 import type { Construct } from "./shared/livePreview";
 import { mathClose } from "./typstEditor";
 import { LINE_KEYWORDS, hash, inChapterPreamble, skipEmbedded, skipGroup, skipTrivia, statementAt } from "./typstFragment";
@@ -37,6 +38,11 @@ import { LINE_KEYWORDS, hash, inChapterPreamble, skipEmbedded, skipGroup, skipTr
 //   links      `http://` and `https://` runs are text: nothing in them is markup (`_` and
 //              `@` in URLs). Math and code in them are left as typstMathSpans and
 //              topLevelStatements see them, so formulas and preambles stay theirs.
+//
+// The scan also records the calls it meets in markup (`#theorem[…]`, `#figure(…)`; not the
+// statements or keyword expressions) for the paper hover (`typstCallAt`). Content blocks and
+// strong/emphasis nest by recursion, which stops at MAX_DEPTH levels: deeper markup (only
+// ever pathological) stays source, and the scan never overflows the stack.
 
 /** A formula in markup: `$x$` (inline) or `$ x $` (display). */
 export interface TypstMath extends Construct {
@@ -112,6 +118,20 @@ export interface TypstLabel extends Construct {
 
 export type TypstConstruct = TypstMath | TypstHeading | TypstStyle | TypstItem | TypstTerm | TypstRef | TypstLabel;
 
+/** A call in markup: `#name(…)`, `#name[…]`, `#name.field(…)[…]` (not a statement or keyword). */
+export interface TypstCall {
+  /** Its `#`. */
+  readonly from: number;
+  /** After its name and fields (`#theorem`, `#thm.with`): where its first argument group opens. */
+  readonly nameTo: number;
+  /** After the whole expression (every chained argument group). */
+  readonly to: number;
+  /** `theorem`, `thm.with`. */
+  readonly name: string;
+  /** It carries a content block (`#theorem[…]`, `#box(…)[…]`). */
+  readonly content: boolean;
+}
+
 const IDENT = /[A-Za-z_][\w-]*/y;
 /** A label right after a display formula, on the same line (`$ x $ <eq:x>`). */
 const LABEL = /[ \t]*<([\p{L}\p{N}_][\p{L}\p{N}_:.-]*)>/uy;
@@ -125,8 +145,10 @@ const NUMBER = /(\d+)\.(?=\s|$)/y;
 const NEUTRAL = /#(?:let|set|show|import)(?![\w-])/y;
 /** What a link may hold (Typst's link_prefix); brackets must balance. */
 const URL_CHAR = /[0-9A-Za-z!#$%&*+,\-./:;=?@_~']/;
-/** Letters and digits outside the CJK scripts: `*` and `_` between two of them are text. */
-const WORDY = /(?![\p{sc=Han}\p{sc=Hiragana}\p{sc=Katakana}\p{sc=Hangul}])[\p{Alphabetic}\p{N}]/u;
+/** Nesting levels (content blocks, strong and emphasis) the scan looks into. */
+const MAX_DEPTH = 64;
+/** Calls longer than this get no paper render (the hover compiles them whole). */
+export const PAPER_MAX_CHARS = 4000;
 /** Typst's default list markers, by list depth. */
 const BULLETS = ["•", "‣", "–"];
 /** Where markup may start something the scanner cares about. */
@@ -148,6 +170,8 @@ function lineEndAt(s: string, i: number): number {
 interface Scan {
   readonly s: string;
   readonly out: TypstConstruct[];
+  /** The calls met in markup, inner ones before the call holding them. */
+  readonly calls: TypstCall[];
   /** The top-level statements met so far that join the preamble, as its text. */
   preamble: string;
   /** hash(preamble), computed when a formula needs it. */
@@ -170,27 +194,55 @@ interface Run {
   n: number;
 }
 
-const cache = new WeakMap<Text, readonly TypstConstruct[]>();
+interface Scanned {
+  readonly constructs: readonly TypstConstruct[];
+  readonly calls: readonly TypstCall[];
+}
+
+const cache = new WeakMap<Text, Scanned>();
+
+function scanned(doc: Text): Scanned {
+  let out = cache.get(doc);
+  if (!out) cache.set(doc, (out = scanText(doc.toString())));
+  return out;
+}
 
 /** The live-preview constructs of an editor document in document order, memoized per Text. */
 export function scanTypst(doc: Text): readonly TypstConstruct[] {
-  let out = cache.get(doc);
-  if (!out) cache.set(doc, (out = scanTypstText(doc.toString())));
-  return out;
+  return scanned(doc).constructs;
 }
 
 /** scanTypst over a string. */
 export function scanTypstText(s: string): TypstConstruct[] {
-  const scan: Scan = { s, out: [], preamble: "", key: null, seen: new Map(), link: -1 };
-  markup(scan, 0, s.length, true);
-  return scan.out;
+  return scanText(s).constructs;
+}
+
+function scanText(s: string): { constructs: TypstConstruct[]; calls: TypstCall[] } {
+  const scan: Scan = { s, out: [], calls: [], preamble: "", key: null, seen: new Map(), link: -1 };
+  markup(scan, 0, s.length, true, false, 0);
+  return { constructs: scan.out, calls: scan.calls };
+}
+
+/**
+ * The call in markup whose `#name` is at `pos` (its `#` to the end of its name, inclusive)
+ * when it renders as a page: it carries a content block (`#theorem[…]`) or is `#figure(…)`
+ * or `#image(…)`, and is at most PAPER_MAX_CHARS long. Null elsewhere (math, code,
+ * statements, other calls).
+ */
+export function typstCallAt(doc: Text, pos: number): TypstCall | null {
+  for (const c of scanned(doc).calls) {
+    if (pos < c.from || pos > c.nameTo) continue;
+    const paper = c.content || c.name === "figure" || c.name === "image";
+    return paper && c.to - c.from <= PAPER_MAX_CHARS ? c : null;
+  }
+  return null;
 }
 
 /**
  * Scan markup in [from, to): the file (`top`), the inside of a content block (`block`:
- * list markers may open it) or of a strong or emphasis.
+ * list markers may open it) or of a strong or emphasis, `depth` levels down.
  */
-function markup(scan: Scan, from: number, to: number, top: boolean, block = false): void {
+function markup(scan: Scan, from: number, to: number, top: boolean, block: boolean, depth: number): void {
   const { s } = scan;
   const runs: Run[] = [];
   let i = from;
@@ -217,10 +269,10 @@ function markup(scan: Scan, from: number, to: number, top: boolean, block = fals
         }
         i = stmt.next;
       } else {
-        i = embedded(scan, i + 1);
+        i = embedded(scan, i + 1, depth);
       }
     } else if (c === "*" || c === "_") {
-      i = style(scan, i, to, top);
+      i = style(scan, i, to, top, depth);
     } else if (c === "@") {
       i = ref(scan, i, to);
     } else if (c === "<") {
@@ -345,14 +397,14 @@ function math(scan: Scan, i: number, to: number): number {
 }
 
 /** `*strong*` or `_emph_` opening at `i`, closed before the end of its line (and `to`). */
-function style(scan: Scan, i: number, to: number, top: boolean): number {
+function style(scan: Scan, i: number, to: number, top: boolean, depth: number): number {
   const { s } = scan;
   const d = s[i];
   if (i < scan.link || inWord(s, i)) return i + 1;
   const close = find(s, i + 1, Math.min(lineEndAt(s, i), to), (at) => s[at] === d && !inWord(s, at));
   if (close < 0) return i + 1; // unclosed: text for now
   if (close > i + 1) scan.out.push({ kind: d === "*" ? "strong" : "emph", from: i, to: close + 1 });
-  markup(scan, i + 1, close, top);
+  if (depth < MAX_DEPTH) markup(scan, i + 1, close, top, false, depth + 1);
   return close + 1;
 }
 
@@ -426,18 +478,6 @@ function linkEnd(s: string, i: number): number {
   return j;
 }
 
-function wordy(s: string, at: number): boolean {
-  const cp = s.codePointAt(at);
-  return cp !== undefined && WORDY.test(String.fromCodePoint(cp));
-}
-
-/** A `*` or `_` at `i` between two word characters is text (Typst's in_word). */
-function inWord(s: string, i: number): boolean {
-  let p = i - 1;
-  if (p > 0 && (s.charCodeAt(p) & 0xfc00) === 0xdc00) p--; // the low half of a pair
-  return p >= 0 && wordy(s, p) && wordy(s, i + 1);
-}
-
 /**
  * The first position in [i, end) where `hit` holds, walking markup as the scan does:
  * escapes, comments, raw text, math, embedded code, references (with a supplement) and
@@ -477,10 +517,11 @@ function find(s: string, i: number, end: number, hit: (at: number) => boolean): 
 }
 
 /**
- * The embedded expression after a `#` (at `i - 1`) that is not a top-level statement: code
- * is skipped, the content blocks a call carries are scanned as markup. Returns its end.
+ * The embedded expression after a `#` (at `i - 1`) that is not a top-level statement, at
+ * markup depth `depth`: code is skipped, the content blocks a call carries are scanned as
+ * markup, and a call is recorded. Returns its end.
  */
-function embedded(scan: Scan, i: number): number {
+function embedded(scan: Scan, i: number, depth: number): number {
   const { s } = scan;
   let j: number;
   const c = s[i];
@@ -497,12 +538,18 @@ function embedded(scan: Scan, i: number): number {
     j = i + id[0].length;
   }
   // Calls, content blocks and fields chain on, as in Typst (no space in between).
+  let nameTo = -1;
+  let content = false;
   for (;;) {
     if (s[j] === "(" || s[j] === "[") {
+      if (nameTo < 0) nameTo = j;
       const end = skipGroup(s, j);
       // Unclosed (being typed): the rest of its line is not markup.
       if (end < 0) return lineEndAt(s, j);
-      if (s[j] === "[") markup(scan, j + 1, end - 1, false, true);
+      if (s[j] === "[") {
+        content = true;
+        if (depth < MAX_DEPTH) markup(scan, j + 1, end - 1, false, true, depth + 1);
+      }
       j = end;
       continue;
     }
@@ -514,6 +561,7 @@ function embedded(scan: Scan, i: number): number {
         continue;
       }
     }
+    if (c !== "[" && nameTo > i) scan.calls.push({ from: i - 1, nameTo, to: j, name: s.slice(i, nameTo), content });
     return j;
   }
 }

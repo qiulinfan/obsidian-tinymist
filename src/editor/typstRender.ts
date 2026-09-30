@@ -1,19 +1,24 @@
 import { Extension, Text } from "@codemirror/state";
+import { EditorView } from "@codemirror/view";
 import { dirname, join, resolve } from "path";
 import { FragmentError, vaultPath } from "../lsp/fragmentRenderer";
-import type { FragmentRenderer, RenderRequest, RenderResult } from "./shared/livePreview";
-import { hoverError, renderHover } from "./shared/renderHover";
+import { FragmentRenderer, RenderRequest, RenderResult, liveActive } from "./shared/livePreview";
+import { HoverTarget, cursorPreview, hoverError, renderHover } from "./shared/renderHover";
 import {
   FRAGMENT_PT,
   MathFragment,
+  PAPER_MAX_IMAGE_BYTES,
+  PAPER_PT,
   PreambleStatement,
   TopLevelStatement,
   chapterStatements,
   documentStatements,
   fragmentSource,
   hash,
+  imageBytes,
   inChapterPreamble,
   needsEnclosingCode,
+  paperSource,
   preambleLine,
   projectStatements,
   readSvg,
@@ -22,22 +27,48 @@ import {
   typstMathAt,
 } from "./typstFragment";
 import { PreambleFailure, isTypstMathRequest } from "./typstLive";
+import { scanTypst, typstCallAt } from "./typstScan";
 
 /** What compiles a fragment source in a folder (TypstFragmentRenderer). */
 export interface FragmentBackend {
   render(dir: string, source: string): Promise<string>;
 }
 
-/** A rendered formula. */
+/** A rendered formula, or a call's page (paper mode). */
 export interface RenderedFragment {
   ok: true;
   /** Post-processed SVG (readSvg). */
   svg: string;
+  /** A block: display math, or a page. */
   display: boolean;
-  /** Size and vertical-align in em (1em = FRAGMENT_PT), so font-size changes need no render. */
+  /**
+   * Size and vertical-align in em (1em = FRAGMENT_PT, a page's PAPER_PT), so font-size
+   * changes need no render.
+   */
   wEm: number;
   hEm: number;
   vaEm: number;
+}
+
+/** How a fragment compiles: a formula (inline or display), or a call on a page. */
+type FragmentMode = "inline" | "display" | "paper";
+
+/** A call rendered on a page (the paper hover): the pointer is on its `#name`. */
+export interface PaperFragment extends HoverTarget {
+  /** Its `#`. */
+  readonly from: number;
+  /** After its name: the pointer's range is [from, to]. */
+  readonly to: number;
+  /** After the whole call. */
+  readonly callTo: number;
+  /** The call's source. */
+  readonly body: string;
+}
+
+/** The call whose `#name` is at `pos`, when it renders as a page (typstCallAt), or null. */
+export function typstPaperAt(doc: Text, pos: number): PaperFragment | null {
+  const c = typstCallAt(doc, pos);
+  return c && { from: c.from, to: c.nameTo, callTo: c.to, body: doc.sliceString(c.from, c.to) };
 }
 
 export type FragmentResult =
@@ -76,13 +107,14 @@ const CHANGE_DEBOUNCE_MS = 300;
 /**
  * Typst formula renders for one vault: the preamble for a formula (project part from
  * disk, chapter part from the editor buffer), the backend call, SVG post-processing and
- * an LRU cache. A key is the folder (relative imports), a hash of the preamble, the mode
- * and the formula, so buffer edits never need an invalidation. The files a preamble reads
- * are not in the key: when one of them is modified, the renders of the files whose
- * preambles read it (dependencies) are dropped and their epoch bumped. A file created,
- * deleted or renamed drops those of every other file. A file never reads itself, and a
- * book's chapters read neither each other nor the book main's includes, so a chapter's
- * autosave (at every typing pause) leaves the other open chapters alone.
+ * an LRU cache of formulas (paper renders are not kept: a page shows images and data
+ * files no epoch follows). A key is the folder (relative imports), a hash of the preamble,
+ * the mode and the formula, so buffer edits never need an invalidation. The files a
+ * preamble reads are not in the key: when one of them is modified, the renders of the
+ * files whose preambles read it (dependencies) are dropped and their epoch bumped. A file
+ * created, deleted or renamed drops those of every other file. A file never reads itself,
+ * and a book's chapters read neither each other nor the book main's includes, so a
+ * chapter's autosave (at every typing pause) leaves the other open chapters alone.
  */
 export class TypstRender {
   /** Per file, the times its renders were dropped or its failures retried. */
@@ -157,23 +189,60 @@ export class TypstRender {
   }
 
   /** The render of formula `m` of `file`, whose editor text is `doc`. */
-  async math(file: string, doc: Text, m: MathFragment): Promise<FragmentResult> {
+  math(file: string, doc: Text, m: MathFragment): Promise<FragmentResult> {
+    return this.fragment(file, doc, m.from, m.body, m.display ? "display" : "inline");
+  }
+
+  /**
+   * The paper render of call `c` of `file` (the paper hover): a page PAPER_WIDTH_PT wide, as
+   * tall as the call, in the book's own styles: its document template rules apply too (a
+   * theorem's box, captions; the pages they add around the call are not shown). A template
+   * that holds its body in a container allows the call no page of its own there: on any
+   * Typst error the call renders again without them (a call's own error shows from there).
+   * A call naming more than PAPER_MAX_IMAGE_BYTES of images is not rendered (a failure
+   * saying so).
+   */
+  async paper(file: string, doc: Text, c: PaperFragment): Promise<FragmentResult> {
+    const bytes = imageBytes(c.body, dirname(file), this.root);
+    if (bytes > PAPER_MAX_IMAGE_BYTES) {
+      const mb = (n: number) => `${(n / 2 ** 20).toFixed(1)} MB`;
+      return { ok: false, message: `not rendered on hover: its images take ${mb(bytes)} (at most ${mb(PAPER_MAX_IMAGE_BYTES)})` };
+    }
+    const styled = await this.fragment(file, doc, c.from, c.body, "paper", true);
+    if (styled.ok || styled.transient) return styled;
+    return this.fragment(file, doc, c.from, c.body, "paper");
+  }
+
+  /**
+   * The render of `body`, which starts at `from` in `file` (editor text `doc`), in `mode`;
+   * with `templates`, the preamble keeps the document template rules (bare `#show:`).
+   */
+  private async fragment(
+    file: string,
+    doc: Text,
+    from: number,
+    body: string,
+    mode: FragmentMode,
+    templates = false,
+  ): Promise<FragmentResult> {
     const epoch = this.epoch(file);
-    const project = projectStatements(file, this.root);
+    const project = projectStatements(file, this.root, templates);
     const own = documentStatements(doc);
     this.reads.set(file, this.dependencies(file, project, own));
-    const chapter = chapterStatements(own, m.from);
+    const chapter = chapterStatements(own, from, templates);
     const statements: PreambleStatement[] = [
       ...project,
       ...chapter.map((s) => ({ text: s.text, file, line: doc.lineAt(s.from).number })),
     ];
     const preamble = statements.map((s) => s.text).join("\n");
     const dir = dirname(file);
-    const mode = m.display ? "display" : "inline";
-    const key = `${dir}\n${hash(preamble)}\n${mode}\n${m.body}`;
+    const key = `${dir}\n${hash(preamble)}\n${mode}\n${body}`;
     // The formula under its file's own statements: the book main and templates aside.
-    const formula = `${file}\n${hash(chapter.map((s) => s.text).join("\n"))}\n${mode}\n${m.body}`;
-    const hit = this.cache.get(key);
+    const formula = `${file}\n${hash(chapter.map((s) => s.text).join("\n"))}\n${mode}\n${body}`;
+    // A page may show files no epoch follows (an image, a CSV the call reads): paper renders
+    // are not kept, here or in `last` (the hover never reuses a settled render anyway).
+    const kept = mode !== "paper";
+    const hit = kept ? this.cache.get(key) : undefined;
     let outcome: Outcome;
     if (hit) {
       this.cache.delete(key);
@@ -181,28 +250,31 @@ export class TypstRender {
       outcome = hit.outcome;
     } else {
       const id = `${file}\n${key}`;
+      const source = mode === "paper" ? paperSource(preamble, body) : fragmentSource(preamble, { body, display: mode === "display" });
+      const pt = mode === "paper" ? PAPER_PT : FRAGMENT_PT;
       try {
-        const svg = readSvg(await this.backend.render(dir, fragmentSource(preamble, m)), `f${hash(key)}-`);
+        const svg = readSvg(await this.backend.render(dir, source), `f${hash(key)}-`);
         outcome = svg
           ? {
               ok: true,
               svg: svg.svg,
-              display: m.display,
-              wEm: svg.width / FRAGMENT_PT,
-              hEm: svg.height / FRAGMENT_PT,
-              vaEm: svg.baseline === null ? 0 : -(svg.height - svg.baseline) / FRAGMENT_PT,
+              display: mode !== "inline",
+              wEm: svg.width / pt,
+              hEm: svg.height / pt,
+              vaEm: svg.baseline === null ? 0 : -(svg.height - svg.baseline) / pt,
             }
           : { ok: false, message: "tinymist returned an unreadable SVG", line: null };
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        // No binary, a timeout or a crash says nothing about the formula: not cached.
+        // No binary, a timeout or a crash says nothing about the formula: not cached. Only
+        // formulas are tried again (live views keep their failures; nothing keeps a page's).
         if (!(err instanceof FragmentError)) {
-          if (!this.failed.has(id)) this.failed.set(id, { file, retried: false });
+          if (kept && !this.failed.has(id)) this.failed.set(id, { file, retried: false });
           return { ok: false, message, transient: true };
         }
         outcome = { ok: false, message, line: err.line };
       }
-      if (epoch === this.epoch(file)) {
+      if (kept && epoch === this.epoch(file)) {
         this.cache.set(key, { file, outcome });
         if (this.cache.size > CACHE_SIZE) this.cache.delete(this.cache.keys().next().value!);
       }
@@ -212,6 +284,7 @@ export class TypstRender {
       this.failed.delete(id);
     }
     if (outcome.ok) {
+      if (!kept) return outcome;
       this.last.delete(formula);
       this.last.set(formula, outcome);
       if (this.last.size > CACHE_SIZE) this.last.delete(this.last.keys().next().value!);
@@ -380,32 +453,81 @@ export function fragmentElement(r: RenderedFragment, doc: Document): HTMLElement
 }
 
 /**
- * The render hover for Typst math (a section above tinymist's text hover): the formula
- * under the pointer rendered from the current buffer, or Typst's error with the formula
- * or the preamble line it lies on. A formula that needs the code around it (a loop's or
- * closure's variable) gets no section: the document compiles, only the fragment cannot.
+ * A paper render (a call's page) as an element of `doc`: a white card of the page's size,
+ * inverted when `inverted` (the preview's invert setting in a dark theme).
  */
-export function typstRenderHover(host: {
+export function paperElement(r: RenderedFragment, doc: Document, inverted: boolean): HTMLElement | null {
+  const el = fragmentElement(r, doc);
+  if (!el) return null;
+  el.classList.add("is-paper", "lsp-lp-paper");
+  el.classList.toggle("is-inverted", inverted);
+  return el;
+}
+
+/** What the render hover and the cursor preview need from their view. */
+export interface TypstRenderHost {
   renderer(): TypstRender | null;
   path(): string | null;
   enabled(): boolean;
-}): Extension {
-  return renderHover<MathFragment>({
+  /** Paper renders show inverted (the preview's invert setting, in a dark theme). */
+  inverted?(): boolean;
+}
+
+/**
+ * The rendering of formula or call `t` in `view` from the current buffer, Typst's error
+ * with the source or the preamble line it lies on, or null: no renderer, or a fragment that
+ * needs the code around it (a loop's or closure's variable; the document compiles, only the
+ * fragment cannot).
+ */
+function renderFragment(host: TypstRenderHost, t: MathFragment | PaperFragment, view: EditorView): Promise<HTMLElement | null> | null {
+  const renderer = host.renderer();
+  const path = host.path();
+  if (!renderer || !path) return null;
+  const doc = view.dom.ownerDocument;
+  const text = view.state.doc;
+  const paper = "callTo" in t;
+  // A call's error shows its first line, not the whole call.
+  const source = paper ? t.body.split("\n", 1)[0] : t.body;
+  return (paper ? renderer.paper(path, text, t) : renderer.math(path, text, t)).then((r) => {
+    if (!r.ok) {
+      if (!r.at && needsEnclosingCode(text, { from: t.from, to: paper ? t.callTo : t.to }, r.message)) return null;
+      return hoverError(r.message, r.at ?? source, doc);
+    }
+    const el = paper ? paperElement(r, doc, host.inverted?.() ?? false) : fragmentElement(r, doc);
+    return el ?? hoverError("tinymist returned an unreadable SVG", source, doc);
+  });
+}
+
+/**
+ * The render hover for Typst (a section above tinymist's text hover): the formula under the
+ * pointer, or, with the pointer on the `#name` of a call that renders as a page (a content
+ * body, `#figure`, `#image`; at most PAPER_MAX_CHARS), the call on a white page
+ * PAPER_WIDTH_PT wide in the book's styles (paper mode). Rendered from the current buffer;
+ * failures show Typst's error (see renderFragment).
+ */
+export function typstRenderHover(host: TypstRenderHost): Extension {
+  return renderHover<MathFragment | PaperFragment>({
     enabled: host.enabled,
-    target: (state, pos) => typstMathAt(state.doc, pos),
-    render: (m, view) => {
-      const renderer = host.renderer();
-      const path = host.path();
-      if (!renderer || !path) return null;
-      const doc = view.dom.ownerDocument;
-      const text = view.state.doc;
-      return renderer.math(path, text, m).then((r) => {
-        if (!r.ok) {
-          if (!r.at && needsEnclosingCode(text, m, r.message)) return null;
-          return hoverError(r.message, r.at ?? m.body, doc);
-        }
-        return fragmentElement(r, doc) ?? hoverError("tinymist returned an unreadable SVG", m.body, doc);
-      });
+    target: (state, pos) => typstMathAt(state.doc, pos) ?? typstPaperAt(state.doc, pos),
+    render: (t, view) => renderFragment(host, t, view),
+  });
+}
+
+/**
+ * The cursor preview for Typst math (setting `cursorPreview`): the formula around the main
+ * cursor rendered below it while it is typed. Inline math in both modes; display math in
+ * source mode, and in live preview only when it is not a block (a revealed block keeps its
+ * own rendering below it, also under an error diagnostic) or live preview does not decorate
+ * (a document grown past its maxLines).
+ */
+export function typstCursorPreview(host: TypstRenderHost): Extension {
+  return cursorPreview<MathFragment>({
+    enabled: host.enabled,
+    target: (state) => {
+      const m = typstMathAt(state.doc, state.selection.main.head);
+      if (!m?.display || !liveActive(state)) return m;
+      return scanTypst(state.doc).some((c) => c.kind === "math" && c.from === m.from && c.block) ? null : m;
     },
+    render: (m, view) => renderFragment(host, m, view),
   });
 }

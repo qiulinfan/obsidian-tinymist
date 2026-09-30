@@ -227,6 +227,19 @@ too. Built in phases that each end runnable and tested.
         edit still shows the chapters' source for 130-200 ms until their new
         renders land (the shared core drops the old epoch's cache; a
         stale-while-revalidate change is requested there).
+  - [x] Stale-while-revalidate across epochs (2026-09-29, headless; shared
+        core, identical in both repositories): a new epoch empties the render
+        cache but each construct keeps its rendering from the epoch before
+        (by request identity, display-only: never a hit or a peek) until its
+        own render lands; a failure shows the source with its error mark, a
+        construct whose text changed has no earlier rendering, and those
+        renderings count against the cache bound (evicted first when nothing
+        shows them; `renderStats().cached`). Three new cases in
+        `tests/livePreview.test.ts` fail on the previous core. On the scratch
+        typst-book with ch1-ch3 live against a real tinymist, a template alias
+        saved left 0 of 38 formulas as source while they rendered again (the
+        previous core: all 38 for 114 ms), every one re-rendered 586 ms after
+        the write (the 300 ms change debounce included).
 - [ ] P3 text constructs: headings, strong/emph, lists, `@label` chips.
   - [x] Typst text constructs (2026-09-29, headless; `typstScan.ts`,
         `typstLive.ts`): headings (size by level, the `=` marker hidden off
@@ -257,7 +270,130 @@ too. Built in phases that each end runnable and tested.
         (`  + a` then `+ b` numbers 1, 2), as `typst compile --format html`
         parses them; the baseline tokenizer skips escapes, so `\$5` no longer
         tints the rest of the file as math.
+  - [x] Scanner hardening (2026-09-29, headless): the scanner's recursion
+        (content blocks, strong/emph) stops at 64 levels and `skipGroup` /
+        `skipEmbedded` pass `#` over as text past 100, so 20,000 nested `#[`
+        no longer overflow the stack (the text below them stays source);
+        escaped delimiters inside `*strong*`/`_emph_` no longer close them in
+        the baseline tokenizer (the escaped `\$` fix was already in; checked on
+        the scratch ch1's `\$5` line).
 - [ ] P6 paper-mode hover of `#call[...]`, `#figure`, `#image`; cursor preview.
+      Headless parts landed; the GUI checks H12 and H13 are still open.
+  - [x] Paper hover (2026-09-29, headless; T-T7): the pointer on the `#name`
+        of a call in markup with a content body, or of `#figure`/`#image`, at
+        most 4,000 characters, renders the call through the fragment renderer
+        on a white page 400 pt wide in the book's styles (book main and chapter
+        statements above it, the template's chrome dropped), shown at 12 pt
+        per em in a paper card inverted when "Invert preview colors" is auto
+        in a dark theme; references a call cannot resolve alone (another
+        chapter's label, an equation or heading numbered only by the dropped
+        template, a citation) show as `@key`/`[key]`. On the scratch
+        typst-book (theorem boxes built on `figure`, proofs, examples, a
+        footnote, cetz, PNG, SVG and table figures) all 19 calls of ch1-ch3
+        render (7 failed on unresolved references before those rules): first
+        108 ms (Chinese fonts), then p50 3.9 ms, max 36 ms (cetz); checked by
+        eye in light and inverted frames. No file written; the renderer exited.
+  - [x] Cursor preview (2026-09-29, headless; T-S13 in
+        `tests/renderHover.test.ts`, shared): setting "Preview the formula at
+        the cursor" (default off): the formula around the cursor renders below
+        it and again after every key in the same tooltip (the last rendering
+        stays while one is pending or failing), hidden while the completion
+        list is open, gone when the cursor leaves or the editor blurs; inline
+        math in both modes, display math in source mode and in live preview
+        when not a block. Typing 25 keys in a formula of the scratch ch1
+        against a real tinymist: each key to its new rendering p50 4.2 ms,
+        p95 6.3 ms, max 20 ms (budget 40 ms). All 262 tests pass (1 skipped);
+        browser smoke 21/21 (B5: mount 8-12 ms, typing p95 3.3-4 ms, cursor
+        move p50 0.2 ms, scroll frame p90 16.7 ms).
+  - [x] Review fixes to the shared core for P4-P6 (2026-09-29, headless;
+        identical in both repositories, `styles.css` synced): a revealed
+        block with an error diagnostic in it keeps its rendering below (the
+        last one, `is-error` when the new source fails; it vanished before),
+        and `liveActive` (live preview mounted and decorating) replaces
+        `isLive` in `typstCursorPreview`, so a live view past maxLines shows
+        the preview for display math; the cursor preview hangs below the
+        formula's last row, not its first (a soft-wrapped formula no longer
+        covers the rows being typed; its left edge stays at the formula's
+        start); `ctx.request(.., epochFree)` keys a request without the epoch
+        (LaTeX Live's images and crops survive a definitions change);
+        asynchronous renders queue by kind, so kinds that answer
+        synchronously keep rendering while one is in flight (Typst's single
+        kind is unchanged: one at a time, in order); ArrowDown from the line
+        above a block where the drawn viewport ends no longer lands one line
+        past the (undrawn, estimated) line after it (`drawnViewport`); in a
+        dark theme a box head keeps its hue lightened to oklch L 0.72
+        (elegantbook's `color=black` was black on the dark background). Four
+        new cases in `tests/livePreview.test.ts` and the new T-S13 case fail
+        on the previous core; the typstRender cursor-preview test covers a
+        live view past maxLines. All 268 tests pass (1 skipped, as before);
+        LaTeX Live's 407 too. Browser smoke 29/29 in both repositories (new
+        B7: at the pane's bottom edge ArrowDown landed on line 55, now 37, the
+        block; B8: in a 420 px pane the preview's top moved from 25 px, over
+        the formula's second row, to 137.5 px, below its last; B5 here: mount
+        6 ms, typing p95 3-4 ms, cursor move p50 0.2 ms, scroll frame p90
+        16.7 ms). On the scratch typst-book against a real tinymist, a `(`
+        typed into a display block of ch1 with its error diagnostic landed:
+        1 lint range and the block's last rendering below it marked
+        `is-error`, no dotted mark (before: nothing rendered). On LaTeX Live's
+        compiled scratch elegantbook in headless Chrome: ch2's formulas were
+        all drawn after 140 ms instead of after its two crops (330 ms), and on
+        ch3 ArrowDown at the pane's bottom edge stopped on the block (line 68)
+        instead of line 76.
+  - [x] Review fixes to the Typst side of P4-P6 (2026-09-29, headless;
+        `typstRender.ts`, `typstFragment.ts`, `typstScan.ts`,
+        `typstEditor.ts`, `highlightPlugin.ts`, `fragmentRenderer.ts`):
+        paper renders are never kept (a page shows images and data files no
+        epoch follows: a re-exported figure showed the old image until the
+        next epoch; on the scratch typst-book the replaced `heatmap.png` now
+        shows at the next hover, 600 ms after the write), in the cache or in
+        `last` (up to 12 MB SVGs with embedded images, in maps bounded by
+        count), and one the renderer failed no longer bumps the file's epoch
+        when the renderer next answers; a paper render keeps the document
+        template rules (bare `#show:`, the book main's and the chapter's), so
+        theorem boxes built on show rules, captions (图 0.1 below, 表 0.1
+        above) and the book's
+        fonts show as in the book (before: a plain centred figure with
+        "定理 0.1: …" below), on a page of the call's own found by a mark in
+        its foreground (the pages a template adds before or after the call
+        are not shown); a template that holds its body in a container fails
+        the page set rule and the call renders again without them (numbers
+        count within the call: 定理 0.1). All 19 calls of ch1-ch3 render
+        (first 55 ms, p50 4.4 ms). A call whose `image("…")` files total more
+        than 10 MB is not rendered and says so (on the scratch book a 9 MB PNG
+        took 0.2 s to render and 0.2-0.3 s to show, 25 MB 3.5 s and 1.2 s, and
+        a 53 MB one passed the 5 s timeout and stopped the renderer live views
+        use; now refused at once, the renderer kept). `skipGroup` is
+        memoized per text: each unclosed content block rescanned those below
+        it (18 unclosed `#box[` lines took 7.1 s per scan, doubling with each
+        line; now 1 ms, 300 lines 17 ms; 4,000 random snippets scan exactly as
+        before). The baseline tokenizer follows Typst's word rule for `*` and
+        `_` and keeps math inside strong/emph as math (`snake_case` or
+        `*a $u*v$ b*` flipped the math tinting of the rest of the file; a
+        whole 5,700-line chapter tokenizes in 2.7 ms, 2.5 ms before);
+        `typstMathSpans` takes a `"` right after `#` as a code string, so
+        `#"$"` no longer pairs with the next formula for the hover and the
+        cursor preview. Six new tests fail on the previous code; all 274 tests
+        pass (1 skipped). The shared part of TY-R1 followed (next item).
+  - [x] Shared core after the reviews (2026-09-29, headless; identical in
+        both repositories): the cursor preview's `getCoords` rect runs from
+        the top of the target's first row to the bottom of its last, so a
+        preview CodeMirror flips above a display near the pane's bottom sits
+        above its first row instead of over its lower rows and the cursor line
+        (the review's probe: flipped to 291-343 px, the `$` line's top at
+        343 px, the cursor line at 391-410 px no longer covered; a wrapped
+        inline formula still gets it below its last row, 74-126 px); and
+        `LiveLanguage.reveals` (optional) names where a construct tests the
+        selection, so a move inside a long LaTeX theorem box re-decorates only
+        the constructs on the lines moved over (Typst declares none; its
+        behaviour is unchanged). New cases: T-S5 with `reveals` and a
+        `reveals` that throws; B5 cursor moves inside a 190-line box of a
+        3,193-line document (p50 0.1 ms, 5.95 decorate calls per move; 2,321
+        without `reveals`); B8 a display near the window's bottom (the
+        preview's bottom at the `\[` line's top, 299.5 px; at 367 px, over
+        the display, with the previous rect). All 276 tests pass (1 skipped,
+        as before); browser smoke 31/31 in both repositories (B5 here: mount
+        7.1 ms, typing p95 4.2 ms, cursor move p50 0.2 ms, scroll frame p90
+        16.7 ms).
 - [ ] P7 verification on multi-file books with templates; measured numbers.
 
 ## v0.3 — product polish

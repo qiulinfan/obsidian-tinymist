@@ -14,6 +14,8 @@ export interface TinymistSettings {
   pinBookMain: boolean;
   /** Render the formula under the pointer above tinymist's hover. */
   hoverRender: boolean;
+  /** Render the formula around the cursor below it while it is typed. */
+  cursorPreview: boolean;
   /** The mode newly opened Typst files start in (each tab then keeps its own). */
   editingMode: "source" | "live";
 }
@@ -25,6 +27,7 @@ export const DEFAULT_SETTINGS: TinymistSettings = {
   yoloTabCompletion: false,
   pinBookMain: true,
   hoverRender: true,
+  cursorPreview: false,
   editingMode: "source",
 };
 
@@ -132,17 +135,35 @@ export class TinymistSettingTab extends PluginSettingTab {
       .setName("Render formulas on hover")
       .setDesc(
         "When the pointer rests on math, show the rendered formula above tinymist's " +
-          "hover. A second tinymist process renders it from the unsaved text with the " +
-          "book main's imports and rules (the lines before it includes the chapter) and " +
-          "the file's own definitions above the formula. A .tinymist-fragment.typ file " +
-          "in the file's folder or above replaces the book main's part, e.g. to set the " +
-          "fonts a template applies inside its #show rule.",
+          "hover; on the #name of a call with a content body (#theorem[…]), or of " +
+          "#figure or #image, show the call on a page 400pt wide (inverted in a dark " +
+          "theme when \"Invert preview colors\" is auto). A second tinymist process " +
+          "renders it from the unsaved text with the book main's imports and rules (the " +
+          "lines before it includes the chapter) and the file's own definitions above it. " +
+          "A .tinymist-fragment.typ file in the file's folder or above replaces the book " +
+          "main's part, e.g. to set the fonts a template applies inside its #show rule.",
       )
       .addToggle((toggle) =>
         toggle
           .setValue(this.plugin.settings.hoverRender)
           .onChange(async (value) => {
             this.plugin.settings.hoverRender = value;
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName("Preview the formula at the cursor")
+      .setDesc(
+        "While the cursor is in a formula, show its rendering below it and update it as " +
+          "you type (inline math in both modes, display math in source mode). Hidden while " +
+          "the completion list is open.",
+      )
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.cursorPreview)
+          .onChange(async (value) => {
+            this.plugin.settings.cursorPreview = value;
             await this.plugin.saveSettings();
           }),
       );

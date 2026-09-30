@@ -5,7 +5,7 @@
 // real renderer process is covered by tests/fragmentRenderer.test.ts.
 import "./support/dom";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
@@ -13,7 +13,9 @@ import { EditorState, Extension, Text } from "@codemirror/state";
 import { EditorView, closeHoverTooltips, hoverTooltip } from "@codemirror/view";
 import { typstEditorExtensions } from "../src/editor/typstEditor";
 import { typstMathAt } from "../src/editor/typstFragment";
-import { FileEvent, FragmentBackend, TypstRender, typstRenderHover } from "../src/editor/typstRender";
+import { FileEvent, FragmentBackend, TypstLiveRenderer, TypstRender, typstCursorPreview, typstPaperAt, typstRenderHover } from "../src/editor/typstRender";
+import { typstLiveLanguage } from "../src/editor/typstLive";
+import { livePreview } from "../src/editor/shared/livePreview";
 import { FragmentError } from "../src/lsp/fragmentRenderer";
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -26,6 +28,14 @@ const CH1_TEXT = readFileSync(CH1, "utf8");
  * baseline marker for inline math, the ink colour on a glyph and a rule.
  */
 function page(source: string): string {
+  // A paper render: the page's fixed width, black ink on white.
+  if (source.includes("#set page(width: 400pt")) {
+    return [
+      '<svg viewBox="0 0 400 120" width="400pt" height="120pt" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">',
+      '<path d="M 0 0v 120h 400v -120Z " fill="#ffffff"/><g><use xlink:href="#g1" fill="#000000"/></g>',
+      '<defs><symbol id="g1" overflow="visible"><path d="M 0 0"/></symbol></defs></svg>',
+    ].join("");
+  }
   const body = source.slice(source.lastIndexOf("$", source.length - 3)).trimEnd().length;
   const inline = source.includes('fill: rgb("#010203")');
   return [
@@ -67,15 +77,30 @@ const tinymistHover: Extension = hoverTooltip(
   { hoverTime: 10 },
 );
 
-/** An editor on `text` (the file `path`) with the render hover above tinymist's. */
-function editor(render: TypstRender, enabled: () => boolean, text = CH1_TEXT, path = CH1) {
+/**
+ * An editor on `text` (the file `path`) with the render hover above tinymist's (paper renders
+ * inverted as `inverted` says) and the cursor preview while `preview` says so.
+ */
+function editor(
+  render: TypstRender,
+  enabled: () => boolean,
+  text = CH1_TEXT,
+  path = CH1,
+  more: { inverted?: () => boolean; preview?: () => boolean; live?: Extension } = {},
+) {
+  const host = { renderer: () => render, path: () => path, enabled, inverted: more.inverted };
   const view = new EditorView({
     state: EditorState.create({
       doc: text,
       extensions: typstEditorExtensions(
         {
           completion: { triggerCharacters: () => [], request: async () => null },
-          hover: [typstRenderHover({ renderer: () => render, path: () => path, enabled }), tinymistHover],
+          hover: [
+            typstRenderHover(host),
+            typstCursorPreview({ ...host, enabled: more.preview ?? (() => false) }),
+            tinymistHover,
+          ],
+          live: more.live,
         },
         text,
       ),
@@ -164,6 +189,260 @@ test("render hover: Typst's error with the formula, and nothing while the settin
     assert.deepEqual((await hoverAt("EE[X] = integral")).map(kind), ["tinymist"]);
   } finally {
     view.destroy();
+    render.dispose();
+  }
+});
+
+test("paper hover: a call with a content body, #figure or #image, on a page 400pt wide in a paper frame", async () => {
+  const text = [
+    CH1_TEXT.trimEnd(),
+    "#let note = [注]",
+    "#figure(rect(width: 1cm), caption: [盒子]) <fig:box>",
+    "#h(1em) #image(\"fig.png\", width: 2cm) #link(\"https://typst.app\")[Typst]",
+    `#box[${"长".repeat(4100)}]`,
+    "$#box[x]$ and #strong[bad",
+    "",
+  ].join("\n");
+  const { backend, calls } = fakeBackend((src) => (src.includes("#strong[oops]") ? new FragmentError("unexpected end of block") : null));
+  const render = new TypstRender(backend, ROOT);
+  let inverted = false;
+  const { view, hoverAt } = editor(render, () => true, text, CH1, { inverted: () => inverted });
+  try {
+    const sections = await hoverAt("#theorem(title");
+    assert.deepEqual(sections.map(kind), ["render", "tinymist"]);
+    const paper = sections[0].querySelector<HTMLElement>(":scope > div.tym-fragment.is-paper.lsp-lp-paper")!;
+    assert.ok(paper && !paper.classList.contains("is-inverted"));
+    const svg = paper.querySelector("svg")!;
+    assert.equal(svg.style.width, `${400 / 12}em`, "a 400pt page at 12pt per em (a PDF at 100%)");
+    assert.ok(svg.innerHTML.includes('fill="#000000"') && !svg.innerHTML.includes("currentColor"), "the page's own ink");
+    // The book main's lines (its document template rule too: the book's look) and the
+    // chapter's statements above the call, the page (marked), the call.
+    const source = calls.at(-1)!.source;
+    const call = text.slice(text.indexOf("#theorem(title"), text.indexOf("]\n\n- 第一项") + 1);
+    assert.ok(
+      source.startsWith('#import "/book/template.typ": *\n#let meta = yaml("/book/meta.yaml")\n#show: book.with(title: meta.title)\n'),
+      source,
+    );
+    assert.ok(source.includes('#import "../template.typ": *\n#set page(width: 400pt, height: auto, margin: 6pt, fill: white'));
+    assert.ok(source.includes('foreground: place(rect(width: 0.1pt, height: 0.1pt, fill: rgb("#010203")))'), "the page's mark");
+    assert.match(source, /\n#show ref: it => if it\.element == none .*\n#show cite: .*\n/, "references outside the call show as keys");
+    assert.ok(source.endsWith(`]]\n${call}\n`), source);
+    assert.ok(!source.includes("#let note"), "statements below the call are not in its preamble");
+
+    // On the name only: its content is markup (its formulas hover as math).
+    assert.deepEqual((await hoverAt("若 $EE")).map(kind), ["tinymist"]);
+    assert.deepEqual((await hoverAt("abs(X)] <")).map(kind), ["render", "tinymist"]);
+    assert.ok((await hoverAt("abs(X)] <"))[0].querySelector("span.tym-fragment"), "math, not paper");
+    // #figure and #image render as pages; #link has a content body; #h does not.
+    assert.ok((await hoverAt("#figure("))[0].querySelector(".lsp-lp-paper"));
+    assert.ok((await hoverAt("#image("))[0].querySelector(".lsp-lp-paper"));
+    assert.ok((await hoverAt("#link("))[0].querySelector(".lsp-lp-paper"));
+    assert.deepEqual((await hoverAt("#h(1em)")).map(kind), ["tinymist"]);
+    assert.deepEqual((await hoverAt("#box[长")).map(kind), ["tinymist"], "past 4,000 characters");
+    assert.deepEqual((await hoverAt("#let note")).map(kind), ["tinymist"], "a statement");
+    // In math it is math; an unclosed call is no call.
+    assert.ok((await hoverAt("box[x]$"))[0].querySelector("span.tym-fragment"));
+    assert.deepEqual((await hoverAt("#strong[bad")).map(kind), ["tinymist"]);
+    assert.equal(typstPaperAt(view.state.doc, text.indexOf("#theorem") + 8)?.body, call, "its name's end counts");
+
+    // Inverted as the preview is (the setting "auto" in a dark theme).
+    inverted = true;
+    assert.ok((await hoverAt("#figure("))[0].querySelector(".lsp-lp-paper.is-inverted"));
+  } finally {
+    view.destroy();
+    render.dispose();
+  }
+
+  // A failing call: Typst's error with the call's first line.
+  const bad = "#strong[oops]\n#theorem[\n  x\n  #strong[oops]\n]\n";
+  const r2 = new TypstRender(backend, ROOT);
+  const e = editor(r2, () => true, bad, join(ROOT, "book", "notes", "bad.typ"));
+  try {
+    const [error] = await e.hoverAt("#theorem[");
+    assert.equal(error.querySelector(".lsp-render-hover-message")?.textContent, "unexpected end of block");
+    assert.equal(error.querySelector(".lsp-render-hover-source")?.textContent, "#theorem[");
+  } finally {
+    e.view.destroy();
+    r2.dispose();
+  }
+});
+
+test("TypstRender: a paper render is not kept (an image it shows may change on disk); formulas are", async () => {
+  // The backend answers with the image as it is on disk at each render.
+  let image = "old.png";
+  const calls: string[] = [];
+  const backend: FragmentBackend = {
+    async render(_dir, source) {
+      calls.push(source);
+      return page(source).replace("</svg>", `<image href="${image}"/></svg>`);
+    },
+  };
+  const render = new TypstRender(backend, ROOT);
+  const text = `${CH1_TEXT.trimEnd()}\n#figure(image("fig.png"), caption: [图])\n`;
+  const doc = Text.of(text.split("\n"));
+  const call = typstPaperAt(doc, text.indexOf("#figure(") + 2)!;
+  const m = typstMathAt(doc, text.indexOf("a_1") + 1)!;
+  try {
+    const first = await render.paper(CH1, doc, call);
+    image = "new.png";
+    const second = await render.paper(CH1, doc, call);
+    assert.ok(first.ok && first.svg.includes("old.png") && second.ok && second.svg.includes("new.png"));
+    assert.equal(calls.length, 2, "the same call renders again");
+    await render.math(CH1, doc, m);
+    await render.math(CH1, doc, m);
+    assert.equal(calls.length, 3, "formulas stay cached");
+    // A page the renderer itself failed is not tried again: nothing keeps it (a formula's
+    // failure bumps the file's epoch when the renderer next answers).
+    const timeout: FragmentBackend = {
+      async render(_dir, source) {
+        if (source.includes("#figure(")) throw new Error("rendering took longer than 5 s");
+        return page(source);
+      },
+    };
+    const failing = new TypstRender(timeout, ROOT);
+    try {
+      assert.ok(!(await failing.paper(CH1, doc, call)).ok);
+      assert.ok((await failing.math(CH1, doc, m)).ok);
+      assert.equal(failing.epoch(CH1), 0, "no retry for the page");
+    } finally {
+      failing.dispose();
+    }
+  } finally {
+    render.dispose();
+  }
+});
+
+test("TypstRender: a paper render keeps the document template rules; without them when Typst fails with them", async () => {
+  // A template holding its body in a container: Typst allows the page no set rule there.
+  const container = "page configuration is not allowed inside of containers";
+  const { backend, calls } = fakeBackend((src) =>
+    src.includes("#show: book") && src.includes("#set page(width: 400pt")
+      ? new FragmentError(container, 3)
+      : src.includes("#strong[oops]")
+        ? new FragmentError("unexpected end of block")
+        : null,
+  );
+  const render = new TypstRender(backend, ROOT);
+  const text = `${CH1_TEXT.trimEnd()}\n#show: rest => rest\n#figure(rect(), caption: [盒])\n#box[#strong[oops]]\n`;
+  const doc = Text.of(text.split("\n"));
+  const figure = typstPaperAt(doc, text.indexOf("#figure(") + 2)!;
+  try {
+    const r = await render.paper(CH1, doc, figure);
+    assert.ok(r.ok, JSON.stringify(r));
+    assert.equal(calls.length, 2, "with the template rules, then without");
+    assert.ok(calls[0].source.includes("#show: book.with(title: meta.title)\n") && calls[0].source.includes("#show: rest => rest\n"));
+    assert.ok(!calls[1].source.includes("#show: book") && !calls[1].source.includes("#show: rest"));
+    // A call's own error: Typst's message from the render without them.
+    const bad = await render.paper(CH1, doc, typstPaperAt(doc, text.indexOf("#box[#strong") + 2)!);
+    assert.ok(!bad.ok && bad.message === "unexpected end of block", JSON.stringify(bad));
+    assert.equal(calls.length, 4);
+    // Formulas never keep them.
+    await render.math(CH1, doc, typstMathAt(doc, text.indexOf("a_1") + 1)!);
+    assert.ok(!calls[4].source.includes("#show: book") && !calls[4].source.includes("#show: rest"));
+  } finally {
+    render.dispose();
+  }
+});
+
+test("TypstRender: a call naming more than 10 MB of images gets no paper render", async () => {
+  const book = tempBook();
+  const { backend, calls } = fakeBackend();
+  const render = new TypstRender(backend, book.root);
+  mkdirSync(book.path("figures"));
+  // Sparse files: the size without the bytes.
+  writeFileSync(book.path("figures/small.png"), "");
+  truncateSync(book.path("figures/small.png"), 6 * 2 ** 20);
+  writeFileSync(book.path("figures/large.png"), "");
+  truncateSync(book.path("figures/large.png"), 6 * 2 ** 20);
+  const text = [
+    '#figure(image("../figures/small.png"), caption: [a])',
+    '#figure(grid(image("../figures/small.png"), image("/book/figures/large.png")), caption: [b])',
+    '#figure(image("../figures/missing.png"), caption: [c])',
+    "",
+  ].join("\n");
+  const doc = Text.of(text.split("\n"));
+  const at = (needle: string) => typstPaperAt(doc, text.indexOf(needle) + 2)!;
+  try {
+    assert.ok((await render.paper(book.path("chapters/ch1.typ"), doc, at("#figure(image(\"../figures/small"))).ok);
+    const big = await render.paper(book.path("chapters/ch1.typ"), doc, at("#figure(grid"));
+    assert.ok(!big.ok && big.message === "not rendered on hover: its images take 12.0 MB (at most 10.0 MB)", JSON.stringify(big));
+    assert.equal(calls.length, 1, "the renderer is not asked");
+    assert.ok((await render.paper(book.path("chapters/ch1.typ"), doc, at("#figure(image(\"../figures/missing"))).ok, "Typst's to report");
+  } finally {
+    render.dispose();
+    book.close();
+  }
+});
+
+test("cursor preview: the formula at the cursor below it while typed (setting-gated); in live preview not over a block it decorates", async () => {
+  const { backend, calls } = fakeBackend();
+  const render = new TypstRender(backend, ROOT);
+  let on = false;
+  const text = "Inline $a + b$ here.\n$ x^2 $\ntext $ y $ inline display\n";
+  const { view } = editor(render, () => true, text, CH1, { preview: () => on });
+  const shown = () => view.dom.querySelector(".cm-tooltip.lsp-cursor-preview:not(.is-empty) svg");
+  try {
+    view.focus();
+    await sleep(40);
+    view.dispatch({ selection: { anchor: text.indexOf("a +") } });
+    await sleep(20);
+    assert.equal(view.dom.querySelector(".lsp-cursor-preview"), null, "off by default");
+    on = true;
+    view.dispatch({ selection: { anchor: text.indexOf("a +") + 1 } });
+    await sleep(20);
+    assert.ok(shown(), "rendered below the formula");
+    assert.equal(calls.at(-1)!.source.trimEnd().split("\n").at(-1)!.endsWith("$a + b$"), true);
+    // Typing inside re-renders from the buffer.
+    view.dispatch({ changes: { from: text.indexOf(" b$") + 2, insert: "c" }, userEvent: "input.type" });
+    await sleep(20);
+    assert.ok(calls.at(-1)!.source.trimEnd().endsWith("$a + bc$"));
+    assert.ok(shown());
+    // Source mode: display math too.
+    view.dispatch({ selection: { anchor: view.state.doc.toString().indexOf("x^2") } });
+    await sleep(20);
+    assert.ok(view.dom.querySelector(".lsp-cursor-preview div.tym-fragment.is-display"));
+  } finally {
+    view.destroy();
+  }
+
+  // Live preview: a display block keeps its own rendering below it; a display inside a line
+  // and inline math get the preview.
+  const live = new TypstLiveRenderer(render, CH1, () => document);
+  const l = editor(render, () => true, text, CH1, {
+    preview: () => true,
+    live: livePreview({ language: typstLiveLanguage(), renderer: live }),
+  });
+  const preview = () => l.view.dom.querySelector(".lsp-cursor-preview");
+  try {
+    l.view.focus();
+    await sleep(40);
+    l.view.dispatch({ selection: { anchor: text.indexOf("x^2") } });
+    await sleep(20);
+    assert.equal(preview(), null, "a block: none");
+    l.view.dispatch({ selection: { anchor: text.indexOf("y $") } });
+    await sleep(20);
+    assert.ok(preview(), "a display inside a line");
+    l.view.dispatch({ selection: { anchor: text.indexOf("a +") } });
+    await sleep(20);
+    assert.ok(preview(), "inline math");
+  } finally {
+    l.view.destroy();
+  }
+
+  // Live preview that does not decorate (a document grown past maxLines): no rendering below
+  // the block, so the cursor preview shows it.
+  const long = editor(render, () => true, text, CH1, {
+    preview: () => true,
+    live: livePreview({ language: typstLiveLanguage(), renderer: live, maxLines: 1 }),
+  });
+  try {
+    long.view.focus();
+    await sleep(40);
+    long.view.dispatch({ selection: { anchor: text.indexOf("x^2") } });
+    await sleep(20);
+    assert.ok(long.view.dom.querySelector(".lsp-cursor-preview div.tym-fragment.is-display"), "the block, live preview inactive");
+  } finally {
+    long.view.destroy();
     render.dispose();
   }
 });

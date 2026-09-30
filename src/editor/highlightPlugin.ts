@@ -28,14 +28,76 @@ interface TokState {
   inMath: boolean;
 }
 
+type Push = (from: number, to: number, cls: string) => void;
+
 const TRIGGER = /[\\#@<"`*_$/=]/;
+
+/** Letters and digits outside the CJK scripts: `*` and `_` between two of them are text. */
+const WORDY = /(?![\p{sc=Han}\p{sc=Hiragana}\p{sc=Katakana}\p{sc=Hangul}])[\p{Alphabetic}\p{N}]/u;
+
+function wordy(s: string, at: number): boolean {
+  const cp = s.codePointAt(at);
+  return cp !== undefined && WORDY.test(String.fromCodePoint(cp));
+}
+
+/**
+ * A `*` or `_` at `i` between two word characters is text (Typst's in_word; the live
+ * preview scanner, typstScan.ts, takes the rule from here).
+ */
+export function inWord(s: string, i: number): boolean {
+  let p = i - 1;
+  if (p > 0 && (s.charCodeAt(p) & 0xfc00) === 0xdc00) p--; // the low half of a pair
+  return p >= 0 && wordy(s, p) && wordy(s, i + 1);
+}
+
+/**
+ * After the formula whose content starts at `i` on this line (escapes skipped), or -1 when
+ * it does not close on the line.
+ */
+function mathEnd(text: string, i: number): number {
+  while (i < text.length && text[i] !== "$") i += text[i] === "\\" ? 2 : 1;
+  return i < text.length ? i + 1 : -1;
+}
+
+/**
+ * `*strong*` or `_emph_` opening at `i`, closed on its line as Typst closes it: a delimiter
+ * between two word characters is text (`snake_case`, `2*3`, `*a*b` closes later), an
+ * escaped one closes nothing, and a formula inside is passed over and tinted as math (its
+ * `*` or `_` closes nothing either). Returns where tokenizing goes on.
+ */
+function style(text: string, lineStart: number, i: number, push: Push): number {
+  const d = text[i];
+  if (inWord(text, i)) return i + 1;
+  const maths: [number, number][] = [];
+  let j = i + 1;
+  for (;;) {
+    if (j >= text.length) return i + 1; // unclosed: text
+    const c = text[j];
+    if (c === "\\") j += 2;
+    else if (c === "$") {
+      const end = mathEnd(text, j + 1);
+      if (end < 0) return i + 1; // a formula going on below: the `$` opens it
+      maths.push([j, end]);
+      j = end;
+    } else if (c === d && !inWord(text, j)) break;
+    else j++;
+  }
+  if (j === i + 1) return j + 1; // empty
+  push(lineStart + i, lineStart + j + 1, d === "*" ? "tym-strong" : "tym-emphasis");
+  for (const [from, to] of maths) {
+    push(lineStart + from, lineStart + from + 1, "tym-keyword");
+    if (to - 1 > from + 1) push(lineStart + from + 1, lineStart + to - 1, "tym-math");
+    push(lineStart + to - 1, lineStart + to, "tym-keyword");
+  }
+  return j + 1;
+}
 
 function tokenizeLine(
   text: string,
   lineStart: number,
   atDocLineStart: boolean,
   s: TokState,
-  push: (from: number, to: number, cls: string) => void,
+  push: Push,
 ): void {
   const n = text.length;
   let i = 0;
@@ -98,6 +160,10 @@ function tokenizeLine(
       i++;
       continue;
     }
+    if (ch === "*" || ch === "_") {
+      i = style(text, lineStart, i, push);
+      continue;
+    }
     const rest = text.slice(i);
     let m: RegExpExecArray | null;
     if ((m = /^#[A-Za-z_][A-Za-z0-9_.-]*/.exec(rest))) {
@@ -110,10 +176,6 @@ function tokenizeLine(
       push(lineStart + i, lineStart + i + m[0].length, "tym-string");
     } else if ((m = /^`(?:[^`\\]|\\.)*`/.exec(rest))) {
       push(lineStart + i, lineStart + i + m[0].length, "tym-raw");
-    } else if ((m = /^\*(?:[^*\n]|\\\*)+\*/.exec(rest))) {
-      push(lineStart + i, lineStart + i + m[0].length, "tym-strong");
-    } else if ((m = /^_(?:[^_\n]|\\_)+_/.exec(rest))) {
-      push(lineStart + i, lineStart + i + m[0].length, "tym-emphasis");
     }
     i += m ? m[0].length : 1;
   }

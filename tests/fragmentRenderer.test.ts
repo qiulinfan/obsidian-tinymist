@@ -1,4 +1,4 @@
-// T-T2..T-T4: the dedicated fragment renderer (src/lsp/fragmentRenderer.ts) and the
+// T-T2..T-T4, T-T7: the dedicated fragment renderer (src/lsp/fragmentRenderer.ts) and the
 // render glue (src/editor/typstRender.ts) against a real tinymist, on a copy of the
 // synthetic book in tests/fixtures/book inside a temporary vault. Skipped when no
 // tinymist binary is found (TINYMIST_BIN overrides the lookup). Binaries that do not
@@ -8,9 +8,10 @@ import { cpSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, wri
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { crc32, deflateSync } from "node:zlib";
 import { Text } from "@codemirror/state";
 import { fragmentSource, readSvg, typstMathAt } from "../src/editor/typstFragment";
-import { FragmentResult, TypstRender } from "../src/editor/typstRender";
+import { FragmentResult, TypstRender, typstPaperAt } from "../src/editor/typstRender";
 import { LspClient, LspDiagnostic, pathToUri } from "../src/lsp/client";
 import { FRAGMENT_DOC, FragmentError, TypstFragmentRenderer } from "../src/lsp/fragmentRenderer";
 
@@ -46,6 +47,25 @@ function files(dir: string): string[] {
 }
 
 const inline = (body: string) => ({ body, display: false });
+
+/** A valid 1x1 RGB PNG (synthetic test data). */
+function onePixelPng(): Buffer {
+  const chunk = (type: string, data: Buffer) => {
+    const body = Buffer.concat([Buffer.from(type, "ascii"), data]);
+    const out = Buffer.alloc(4 + body.length + 4);
+    out.writeUInt32BE(data.length, 0);
+    body.copy(out, 4);
+    out.writeUInt32BE(crc32(body), 4 + body.length);
+    return out;
+  };
+  const header = Buffer.from([0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0]);
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk("IHDR", header),
+    chunk("IDAT", deflateSync(Buffer.from([0, 200, 30, 30]))),
+    chunk("IEND", Buffer.alloc(0)),
+  ]);
+}
 const width = (svg: string) => readSvg(svg, "f-")!.width;
 /** The glyphs a render uses (ids are content hashes, prefixed per render). */
 const glyphs = (r: FragmentResult) =>
@@ -148,6 +168,55 @@ test("the fragment renderer against a real tinymist", { skip: !BIN && "tinymist 
       assert.equal(calls, 1);
       render.dispose();
       counted.dispose();
+      assert.deepEqual(files(vault), before);
+    });
+
+    await t.test("T-T7: paper mode renders a #theorem[...] call on a page 400pt wide in the book's styles", async () => {
+      const render = new TypstRender(renderer, vault);
+      const path = join(chapters, "ch1.typ");
+      // A 1x1 PNG next to the chapter, read relative to it (the fragment sits in its folder).
+      const png = join(chapters, "dot.png");
+      writeFileSync(png, onePixelPng());
+      try {
+        const text = `${readFileSync(path, "utf8")}\n#figure(image("dot.png", width: 1cm), caption: [点])\n`;
+        const doc = Text.of(text.split("\n"));
+        const theorem = typstPaperAt(doc, text.indexOf("#theorem") + 1);
+        assert.ok(theorem?.body.startsWith("#theorem(title: [全期望])[") && theorem.body.endsWith("]"), theorem?.body);
+        const t0 = performance.now();
+        const r = await render.paper(path, doc, theorem!);
+        const ms = performance.now() - t0;
+        assert.ok(r.ok, JSON.stringify(r));
+        assert.equal(Math.round(r.wEm * 12), 400, "the page's fixed width");
+        assert.ok(r.hEm * 12 > 30 && r.hEm * 12 < 300, `as tall as the call: ${r.hEm * 12}pt`);
+        assert.match(r.svg, /fill="#ffffff"/i, "a white page");
+        assert.match(r.svg, /#1f5fbf/i, "the template's accent: the book's preamble applied");
+        assert.ok(!r.svg.includes("currentColor"), "the page keeps its own ink");
+        // References to what lies outside the call (a numbered equation, a chapter heading
+        // numbered by the dropped template, a bibliography key) show as keys, not errors.
+        const refs = `${text}\n#theorem[见 @eq:var、@chap:prob 与 #cite(<wang2022>)。]\n`;
+        const refsDoc = Text.of(refs.split("\n"));
+        const cited = await render.paper(path, refsDoc, typstPaperAt(refsDoc, refs.lastIndexOf("#theorem") + 1)!);
+        assert.ok(cited.ok, JSON.stringify(cited));
+        const figure = typstPaperAt(doc, text.indexOf("#figure(image") + 2);
+        const f = await render.paper(path, doc, figure!);
+        assert.ok(f.ok && Math.round(f.wEm * 12) === 400, JSON.stringify(f).slice(0, 300));
+        assert.match(f.svg, /<image\b/, "the image, read from the chapter's folder");
+        // The book's document template applies (its caption colour), not its title page.
+        assert.match(f.svg, /#6b2fa3/i, "the document template's caption colour");
+        assert.ok(!f.svg.includes("#010203"), "the page's mark stripped");
+        // A template rule adding a page after the call (the call's page is the marked one);
+        // one holding the body in a container (no page of its own there: rendered without).
+        for (const rule of ["#show: rest => { rest; pagebreak(); [colophon] }", "#show: rest => block(inset: 2pt, rest)"]) {
+          const t = text.replace('\n#figure(image("dot.png"', `\n${rule}\n#figure(image("dot.png"`);
+          const d = Text.of(t.split("\n"));
+          const r = await render.paper(path, d, typstPaperAt(d, t.indexOf("#figure(image") + 2)!);
+          assert.ok(r.ok && Math.round(r.wEm * 12) === 400 && /<image\b/.test(r.svg), `${rule}: ${JSON.stringify(r).slice(0, 300)}`);
+        }
+        console.log(`# T-T7 paper render of ch1's theorem: ${ms.toFixed(1)} ms`);
+      } finally {
+        rmSync(png);
+        render.dispose();
+      }
       assert.deepEqual(files(vault), before);
     });
 

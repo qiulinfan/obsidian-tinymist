@@ -29,6 +29,7 @@ import {
   lspContentChanges,
   mathUsage,
   typstEditorExtensions,
+  typstMathSpans,
 } from "../src/editor/typstEditor";
 import { LspClient, canonicalUri } from "../src/lsp/client";
 import { bookMain } from "../src/preview/previewEntry";
@@ -670,7 +671,7 @@ test("semantic tokens: edited lines fall back to the baseline tokenizer until th
 });
 
 test("baseline tokenizer: escapes are text; an escaped dollar opens no math, in markup or math", () => {
-  const doc = ["Price \\$5 and \\#x, not math.", "= Heading", "$a \\$ b$ after", "tail *strong*"].join("\n");
+  const doc = ["Price \\$5 and \\#x, not math.", "= Heading", "$a \\$ b$ after", "tail *strong* *a \\* b* _c \\_ d_"].join("\n");
   const view = new EditorView({
     state: EditorState.create({ doc, extensions: [typstHighlightPlugin] }),
     parent: document.body,
@@ -681,7 +682,44 @@ test("baseline tokenizer: escapes are text; an escaped dollar opens no math, in 
     assert.deepEqual(spans(0), []);
     assert.deepEqual(spans(1), ["tym-heading = Heading"]);
     assert.deepEqual(spans(2), ["tym-keyword $", "tym-math a \\$ b", "tym-keyword $"]);
-    assert.deepEqual(spans(3), ["tym-strong *strong*"]);
+    assert.deepEqual(spans(3), ["tym-strong *strong*", "tym-strong *a \\* b*", "tym-emphasis _c \\_ d_"], "an escaped delimiter closes nothing");
+  } finally {
+    view.destroy();
+  }
+});
+
+test("baseline tokenizer: `*` and `_` between two letters are text; math inside strong or emph stays math", () => {
+  const doc = [
+    "变量 snake_case 与 $x_1$ 。",
+    "*粗体 $u*v$ 结尾* 与 $w$。",
+    "2*3 and *a*b c* then _e $y_2$ f_",
+    "*open $z",
+    "+ 1$ and a_b*",
+    "next $n$ line",
+  ].join("\n");
+  const view = new EditorView({
+    state: EditorState.create({ doc, extensions: [typstHighlightPlugin] }),
+    parent: document.body,
+  });
+  const spans = (line: number) =>
+    [...view.contentDOM.querySelectorAll(".cm-line")[line].querySelectorAll("span")]
+      .filter((s) => s.className !== "tym-keyword")
+      .map((s) => `${s.className} ${s.textContent}`);
+  try {
+    assert.deepEqual(spans(0), ["tym-math x_1"], "snake_case is text");
+    assert.deepEqual(spans(1), ["tym-strong *粗体 $u*v$ 结尾*", "tym-math u*v", "tym-math w"]);
+    assert.deepEqual(spans(2), ["tym-strong *a*b c*", "tym-emphasis _e $y_2$ f_", "tym-math y_2"]);
+    // A formula going on below the line is no strong's: it opens math as ever.
+    assert.deepEqual(spans(3), ["tym-math z"]);
+    assert.deepEqual(spans(4), ["tym-math + 1"]);
+    assert.deepEqual(spans(5), ["tym-math n"], "the lines below keep their math");
+    // The tinted math is typstMathSpans' (the hover's and the scanner's).
+    const tinted = [...view.contentDOM.querySelectorAll(".tym-math")].map((s) => s.textContent).join("|");
+    assert.equal(tinted, "x_1|u*v|w|y_2|z|+ 1|n");
+    const math = typstMathSpans(Text.of(doc.split("\n")));
+    const inner: string[] = [];
+    for (let k = 0; k < math.length; k += 2) inner.push(doc.slice(math[k], math[k + 1]).replace("\n", "|"));
+    assert.equal(inner.join("|"), tinted);
   } finally {
     view.destroy();
   }
