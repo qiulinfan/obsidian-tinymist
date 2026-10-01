@@ -66,11 +66,5 @@ LaTeX math as usual. If unsure, use context signals: #import / #let mean
 Typst; \documentclass / \begin{ mean LaTeX.
 ```
 
-Alternatively, apply it from the developer console with YOLO enabled:
-
-```js
-const y = app.plugins.plugins.yolo;
-const s = JSON.parse(JSON.stringify(y.settings));
-(s.continuationOptions ??= {}).tabCompletionConstraints = `<paste the prompt above>`;
-await y.setSettings(s);
-```
+Apply the constraint through YOLO's settings UI. Do not export or copy its entire
+settings object: it can contain provider credentials.

@@ -1,0 +1,89 @@
+name: Release
+
+on:
+  push:
+    tags: ["*"]
+  workflow_dispatch:
+    inputs:
+      attest:
+        description: Generate optional GitHub build provenance for this unpublished tag
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          package-manager-cache: false
+      - name: Verify release identity and version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          node <<'JS'
+          const fs = require('node:fs');
+          const manifest = JSON.parse(fs.readFileSync('manifest.json', 'utf8'));
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          const lock = JSON.parse(fs.readFileSync('package-lock.json', 'utf8'));
+          const versions = JSON.parse(fs.readFileSync('versions.json', 'utf8'));
+          const tag = process.env.RELEASE_TAG;
+          if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(tag)) throw Error('Use an exact x.y.z release tag');
+          if (tag !== manifest.version || tag !== pkg.version || tag !== lock.version || tag !== lock.packages[''].version) throw Error('Tag and package versions differ');
+          if (manifest.id !== 'typst-live' || manifest.name !== 'Typst Live' || manifest.isDesktopOnly !== true) throw Error('Unexpected public identity or platform');
+          if (versions[tag] !== manifest.minAppVersion) throw Error('Minimum app versions differ');
+          if (pkg.license !== 'MIT-0' || lock.packages[''].license !== 'MIT-0') throw Error('Author-owned license metadata differs');
+          JS
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+      - name: Hash release assets
+        run: |
+          sha256sum main.js manifest.json styles.css > SHA256SUMS
+          test ! -e main.js.map
+      - name: Optional build provenance
+        if: vars.RELEASE_ATTESTATION == 'true' || (github.event_name == 'workflow_dispatch' && inputs.attest)
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: |
+            main.js
+            manifest.json
+            styles.css
+      - name: Publish a new release without replacing existing assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release already exists; refusing to replace it."
+            exit 1
+          fi
+          cat > "$RUNNER_TEMP/release-notes.md" <<'EOF'
+          Edit Typst in Obsidian with language-server completion, project-aware formula rendering, and Tinymist's incremental preview.
+
+          - Desktop only; requires Obsidian 1.13.7+ and a separately installed Tinymist executable.
+          - Public plugin ID: `typst-live`. Older personal development copies are not migrated.
+          - Optional YOLO completion is off by default and uses your own configured model service.
+          - Author-owned code and documentation use MIT-0; upstream terms remain unchanged.
+
+          Install the three plugin files in `.obsidian/plugins/typst-live/`. `SHA256SUMS` records their hashes. Community-directory review is separate from this GitHub release.
+          EOF
+          gh release create "$RELEASE_TAG" main.js manifest.json styles.css SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" --verify-tag --title "Typst Live $RELEASE_TAG" \
+            --notes-file "$RUNNER_TEMP/release-notes.md" --latest

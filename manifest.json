@@ -1,9 +1,9 @@
 {
-  "id": "obsidian-tinymist",
-  "name": "Tinymist Typst",
+  "id": "typst-live",
+  "name": "Typst Live",
   "version": "0.1.0",
   "minAppVersion": "1.13.7",
-  "description": "Typst editing and live preview backed by the Tinymist language server: diagnostics, completion, hover, and incremental preview for .typ files.",
+  "description": "Edit Typst documents with language-server completion, project-aware math rendering, and an incremental preview.",
   "author": "Qiulin Fan",
   "authorUrl": "https://github.com/qiulinfan",
   "isDesktopOnly": true

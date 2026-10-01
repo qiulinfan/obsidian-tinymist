@@ -9,6 +9,7 @@ import { join, resolve } from "node:path";
 const FILES = ["main.js", "manifest.json", "styles.css"];
 const repo = resolve(new URL("..", import.meta.url).pathname);
 const vaults = process.argv.slice(2);
+const pluginId = JSON.parse(readFileSync(join(repo, "manifest.json"), "utf8")).id;
 if (!vaults.length) {
   console.error("usage: node scripts/check-install.mjs <vault> [<vault>...]");
   process.exit(2);
@@ -20,7 +21,7 @@ if (!existsSync(join(repo, "main.js"))) {
 const hash = (file) => createHash("sha256").update(readFileSync(file)).digest("hex").slice(0, 12);
 let stale = false;
 for (const vault of vaults) {
-  const dir = join(vault, ".obsidian", "plugins", "obsidian-tinymist");
+  const dir = join(vault, ".obsidian", "plugins", pluginId);
   if (!existsSync(dir)) {
     console.log(`${vault}: not installed`);
     continue;

@@ -394,3 +394,34 @@
 - Installed copies drift from the source: `node scripts/check-install.mjs
   <vault>...` compares a vault's plugin files with this checkout (run
   `npm run build` first).
+
+
+## Public releases
+
+- Public identity: `manifest.json` ID `typst-live`, display name `Typst Live`.
+  Keep internal `tinymist-typst`/`tinymist-preview` view types and virtual
+  fragment document names stable; existing workspace state uses them.
+- Author-owned source and documentation are MIT-0, copyright 2026 Qiulin Fan.
+  Upstream software and copyrightable text in recorded protocol fixtures keep
+  their original licenses; retain `THIRD_PARTY_NOTICES.md` and `licenses/`.
+  Never rewrite development dependencies' individual lockfile licenses.
+- The public plugin does not install or update Tinymist or itself. Users install
+  the binary separately. Runtime network/file disclosures belong in both root
+  READMEs, including local preview, package downloads by the external compiler,
+  and the optional YOLO bridge's configured model service.
+- Release tags use the exact manifest version, such as `0.1.0`, without a `v`
+  prefix. `package.json`, the root lockfile package, and `versions.json` must
+  agree; the version map's minimum app version must match the manifest.
+- `.github/workflows/release.yml` performs `npm ci`, tests, and a production
+  build from the tag, then publishes `main.js`, `manifest.json`, `styles.css`,
+  and `SHA256SUMS`. Existing releases fail closed; do not clobber assets, force
+  tags, or force-push. Build output stays ignored and is never committed.
+- Optional GitHub build provenance runs only when repository variable
+  `RELEASE_ATTESTATION` is `true`, or `workflow_dispatch` on an unpublished tag
+  requests `attest: true`. This is optional provenance, not a prerequisite for
+  runtime installation. Configure it before creating a future release tag;
+  republishing an existing version remains forbidden.
+- Development adapters derive the install directory from the manifest ID.
+  Changing public identity does not authorize reading, copying, or migrating
+  personal vault configuration. Preserve older local installations unless
+  the user specifically requests their migration.
