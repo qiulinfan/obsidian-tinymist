@@ -62,6 +62,10 @@ Mobile is not supported in this release.
 
 ## Installation
 
+### Community directory
+
+Open the [Typst Live community listing](https://community.obsidian.md/plugins/typst-live), choose **Add to Obsidian**, then enable **Typst Live**.
+
 ### GitHub release
 
 Download `main.js`, `manifest.json`, and `styles.css` from
@@ -69,9 +73,7 @@ Download `main.js`, `manifest.json`, and `styles.css` from
 Create `<vault>/.obsidian/plugins/typst-live/`, copy the three files there, then
 reload Obsidian and enable **Typst Live** in Community plugins.
 
-The first public release is **0.1.0**. Community-directory installation will
-be available after Obsidian's submission and review process is complete; a
-GitHub release alone is not a directory approval.
+The first public release is **0.1.0**.
 
 Only one enabled plugin should own the `.typ` editor in a vault. Earlier
 personal development installs used `obsidian-tinymist`; disable that copy

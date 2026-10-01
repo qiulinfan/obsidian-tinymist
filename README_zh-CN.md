@@ -59,6 +59,10 @@ A right triangle satisfies $ x^2 + y^2 = z^2 $.
 
 ## Installation
 
+### 社区目录
+
+打开 [Typst Live 社区页面](https://community.obsidian.md/plugins/typst-live)，点击 **Add to Obsidian**，然后启用 **Typst Live**。
+
 ### GitHub Release
 
 从 [Releases](https://github.com/qiulinfan/obsidian-tinymist/releases/latest)
@@ -66,8 +70,7 @@ A right triangle satisfies $ x^2 + y^2 = z^2 $.
 在 `<vault>/.obsidian/plugins/typst-live/` 建立目录，放入三个文件，再重新加载
 Obsidian 并在社区插件设置中启用 **Typst Live**。
 
-首个公开版本为 **0.1.0**。社区目录安装需要完成 Obsidian 的提交和审核流程；
-发布 GitHub Release 不代表已经通过社区目录审核。
+首个公开版本为 **0.1.0**。
 
 同一个 vault 应只启用一个接管 `.typ` 编辑器的插件。早期个人开发安装使用
 `obsidian-tinymist` ID；启用本版前先停用旧副本。本插件不会复制或迁移旧设置。
