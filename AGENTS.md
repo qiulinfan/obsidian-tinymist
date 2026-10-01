@@ -401,7 +401,7 @@
 - Public identity: `manifest.json` ID `typst-live`, display name `Typst Live`.
   Keep internal `tinymist-typst`/`tinymist-preview` view types and virtual
   fragment document names stable; existing workspace state uses them.
-- Author-owned source and documentation are MIT-0, copyright 2026 Qiulin Fan.
+- Author-owned source and documentation are MIT, copyright 2026 Qiulin Fan.
   Upstream software and copyrightable text in recorded protocol fixtures keep
   their original licenses; retain `THIRD_PARTY_NOTICES.md` and `licenses/`.
   Never rewrite development dependencies' individual lockfile licenses.

@@ -48,13 +48,14 @@ jobs:
           if (tag !== manifest.version || tag !== pkg.version || tag !== lock.version || tag !== lock.packages[''].version) throw Error('Tag and package versions differ');
           if (manifest.id !== 'typst-live' || manifest.name !== 'Typst Live' || manifest.isDesktopOnly !== true) throw Error('Unexpected public identity or platform');
           if (versions[tag] !== manifest.minAppVersion) throw Error('Minimum app versions differ');
-          if (pkg.license !== 'MIT-0' || lock.packages[''].license !== 'MIT-0') throw Error('Author-owned license metadata differs');
+          if (pkg.license !== 'MIT' || lock.packages[''].license !== 'MIT') throw Error('Author-owned license metadata differs');
           JS
       - run: npm ci
       - run: npm test
       - run: npm run build
       - name: Hash release assets
         run: |
+          node -e 'const fs=require("node:fs"); const license=fs.readFileSync("LICENSE","utf8").trim(); for(const file of ["main.js","styles.css"]) if(!fs.readFileSync(file,"utf8").includes(license)) throw Error("Missing full MIT license in "+file);'
           sha256sum main.js manifest.json styles.css > SHA256SUMS
           test ! -e main.js.map
       - name: Optional build provenance
@@ -77,10 +78,12 @@ jobs:
           cat > "$RUNNER_TEMP/release-notes.md" <<'EOF'
           Edit Typst in Obsidian with language-server completion, project-aware formula rendering, and Tinymist's incremental preview.
 
+          This patch aligns author-owned source and documentation with YOLO's standard MIT license. The published JavaScript and stylesheet include the complete copyright and permission notice.
+
           - Desktop only; requires Obsidian 1.13.7+ and a separately installed Tinymist executable.
           - Public plugin ID: `typst-live`. Older personal development copies are not migrated.
           - Optional YOLO completion is off by default and uses your own configured model service.
-          - Author-owned code and documentation use MIT-0; upstream terms remain unchanged.
+          - Author-owned code and documentation use MIT; upstream terms remain unchanged.
 
           Install the three plugin files in `.obsidian/plugins/typst-live/`. `SHA256SUMS` records their hashes. Community-directory review is separate from this GitHub release.
           EOF

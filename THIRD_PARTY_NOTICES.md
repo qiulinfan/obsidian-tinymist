@@ -1,6 +1,6 @@
 # Third-party notices
 
-The author-owned plugin source and documentation use [MIT-0](LICENSE). This
+The author-owned plugin source and documentation use [MIT](LICENSE). This
 license change does not relicense upstream projects, their binaries, libraries,
 or any copyrightable upstream material in recorded protocol responses.
 

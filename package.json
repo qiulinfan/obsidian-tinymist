@@ -1,6 +1,6 @@
 {
   "name": "obsidian-tinymist",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Tinymist-grade Typst editing and live preview for Obsidian, backed by the Tinymist language server",
   "main": "main.js",
   "scripts": {
@@ -19,7 +19,7 @@
     "@codemirror/state": "6.7.0",
     "@codemirror/view": "6.43.8"
   },
-  "license": "MIT-0",
+  "license": "MIT",
   "devDependencies": {
     "@codemirror/autocomplete": "6.20.3",
     "@codemirror/commands": "6.10.4",

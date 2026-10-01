@@ -4,7 +4,7 @@
 <p align="center">
   <a href="https://github.com/qiulinfan/obsidian-tinymist/releases/latest"><img src="https://img.shields.io/github/v/release/qiulinfan/obsidian-tinymist?style=flat-square&color=00b894" alt="Latest release"></a>
   <a href="https://github.com/qiulinfan/obsidian-tinymist/actions/workflows/ci.yml"><img src="https://github.com/qiulinfan/obsidian-tinymist/actions/workflows/ci.yml/badge.svg" alt="Build"></a>
-  <a href="https://github.com/qiulinfan/obsidian-tinymist/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT--0-636e72?style=flat-square" alt="MIT-0"></a>
+  <a href="https://github.com/qiulinfan/obsidian-tinymist/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-636e72?style=flat-square" alt="MIT"></a>
   <img src="https://img.shields.io/badge/Obsidian-1.13.7%2B-7c3aed?style=flat-square" alt="Obsidian 1.13.7 or newer">
   <img src="https://img.shields.io/badge/platform-desktop-6c5ce7?style=flat-square" alt="Desktop only">
 </p>
@@ -171,7 +171,7 @@ of [YOLO](https://github.com/qiulinfan/obsidian-yolo).
 
 ## License
 
-Author-owned source and documentation are [MIT-0](LICENSE), copyright 2026
-Qiulin Fan: use, modify, and redistribute them without an attribution requirement.
+Author-owned source and documentation are [MIT](LICENSE), copyright 2026
+Qiulin Fan: use, modify, and redistribute them while retaining the copyright and permission notices.
 Upstream components and any upstream-derived fixture material retain their
 original licenses. See [third-party notices](THIRD_PARTY_NOTICES.md).
